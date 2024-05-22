@@ -1,0 +1,4 @@
+[default]
+    data_file_path='data/reactome_pathways_API.xlsx'
+    template_file_path='templates/task_prompts.json'
+    results_path='outputs/results'

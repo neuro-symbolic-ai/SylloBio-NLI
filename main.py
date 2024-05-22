@@ -1,55 +1,90 @@
+import json
 import pandas as pd
-from typing import Tuple, List
-from collections import Counter
-from tqdm import tqdm
+from pathways2nl.pathways import load_hierarchy_genes, get_tree, get_ph_tuples, falsify, add_distractors
+from pathways2nl.experiments import SyllogisticReasoningTest
 
 
-def load_hierarchy_genes():
-    df = pd.read_excel("data/reactome_pathways_API.xlsx", dtype={"Length hierarchy": int})
-    df = df[df["Length hierarchy"] <= 5]
-    pw_hierarchy_names = [eval(pwhn) for pwhn in df["pathways_hierarchy_names"].tolist()]
-    pw_genes = [(eval(genes) if (genes.strip()) else []) for genes in df["Genes"].fillna("").tolist()]
-    pw_hierarchy_genes = [(hier, genes) for hier, genes in zip(pw_hierarchy_names, pw_genes) if (genes)]
+def gen_datasets():
+    pw_hierarchy_genes = load_hierarchy_genes()
 
-    return pw_hierarchy_genes
+    # pos_statements, neg_statements, hipotheses = gen_statements(pw_hierarchy_genes)
+    # print(len(pos_statements), len(neg_statements), len(hipotheses))
+    # with open("pos_statements.txt", "w") as out_file:
+    #     print("\n".join(pos_statements), file=out_file)
+    #
+    # with open("neg_statements.txt", "w") as out_file:
+    #     print("\n".join(neg_statements), file=out_file)
+    #
+    # with open("hipotheses.txt", "w") as out_file:
+    #     print("\n".join(hipotheses), file=out_file)
 
+    # with open("statements_by_gene.json", "w") as out_file:
+    #     statements = pos_statements + neg_statements + hipotheses
+    #     json.dump({gene: get_statements_by_gene(gene, statements) for gene in ["PI3K"]},
+    #               out_file, indent=2)
 
-def gen_statements(pw_hierarchy_genes: List[Tuple[List[str], List[str]]]):
-    pos_statements = list()
-    neg_statements = list()
-    hipotheses = list()
-    for pw_hier, genes in tqdm(pw_hierarchy_genes, desc="Generating statements"):
-        for gene in genes:
-            pos_statements.append(f"Gene {gene} is a member of {pw_hier[0]} pathway")
-        for j in range(len(pw_hier) - 1):
-            statement = f"Every member of {pw_hier[j]} pathway is a member of {pw_hier[j + 1]} pathway"
-            pos_statements.append(statement)
-            for k in range(j + 2, len(pw_hier)):
-                statement = f"Every member of {pw_hier[j]} pathway is a member of {pw_hier[k]} pathway"
-                pos_statements.append(statement)
-            for gene in genes:
-                hipotheses.append(f"It is true that Gene {gene} is a member of {pw_hier[j + 1]} pathway")
+    tree = get_tree(pw_hierarchy_genes)
+    ph_tuples = get_ph_tuples(tree, 2, include_genes=True)
+    dummy_ph_tuples = get_ph_tuples(tree, 2, include_genes=True, dummy=True)
 
-            for pw_hier_oth, genes_oth in pw_hierarchy_genes:
-                if (len(set(genes).intersection(genes_oth)) == 0):
-                    neg_statements.append(f"No member of {pw_hier[0]} pathway is a member of {pw_hier_oth[0]} pathway")
-                    for gene in genes:
-                        neg_statements.append(f"Gene {gene} is not a member of {pw_hier_oth[0]} pathway")
+    with open("outputs/sets/gen_modus_ponens_l2.json", "w") as set1_file:
+        json.dump(ph_tuples, set1_file, indent=2)
 
-    return list(Counter(pos_statements).keys()), list(Counter(neg_statements).keys()), list(Counter(hipotheses).keys())
+    with open("outputs/sets/falsified_gen_modus_ponens_l2.json", "w") as set2_file:
+        json.dump(falsify(ph_tuples), set2_file, indent=2)
+
+    add_distractors(ph_tuples, tree, seed=0)
+    with open("outputs/sets/distrac_modus_ponens_l2.json", "w") as set3_file:
+        json.dump(ph_tuples, set3_file, indent=2)
+
+    with open("outputs/sets/distrac_falsified_modus_ponens_l2.json", "w") as set4_file:
+        json.dump(falsify(ph_tuples), set4_file, indent=2)
+
+    with open("outputs/sets/gen_modus_ponens_l2_dummy.json", "w") as set1_dummy_file:
+        json.dump(dummy_ph_tuples, set1_dummy_file, indent=2)
+
+    with open("outputs/sets/falsified_gen_modus_ponens_l2_dummy.json", "w") as set2_dummy_file:
+        json.dump(falsify(dummy_ph_tuples), set2_dummy_file, indent=2)
+
+    add_distractors(dummy_ph_tuples, tree, seed=0)
+    with open("outputs/sets/distrac_modus_ponens_l2_dummy.json", "w") as set3_dummy_file:
+        json.dump(dummy_ph_tuples, set3_dummy_file, indent=2)
+
+    with open("outputs/sets/distrac_falsified_modus_ponens_l2_dummy.json", "w") as set4_dummy_file:
+        json.dump(falsify(dummy_ph_tuples), set4_dummy_file, indent=2)
+
+    print(tree.show(stdout=False))
+
 
 def main():
-    pw_hierarchy_genes = load_hierarchy_genes()
-    pos_statements, neg_statements, hipotheses = gen_statements(pw_hierarchy_genes)
-    print(len(pos_statements), len(neg_statements), len(hipotheses))
-    with open("pos_statements.txt", "w") as out_file:
-        print("\n".join(pos_statements), file=out_file)
+    # gen_datasets()
+    models = [
+        "mistralai/Mistral-7B-v0.1",
+        "mistralai/Mistral-7B-Instruct-v0.2",
+        "mistralai/Mixtral-8x7B-Instruct-v0.1",
+        "google/gemma-7b",
+        "google/gemma-7b-it",
+        "NousResearch/Meta-Llama-3-8B",
+        "BioMistral/BioMistral-7B",
+        "NousResearch/Meta-Llama-3-8B-Instruct",
+        "NousResearch/Hermes-2-Pro-Llama-3-8B",
+    ]
 
-    with open("neg_statements.txt", "w") as out_file:
-        print("\n".join(neg_statements), file=out_file)
+    results = list()
+    for model in models:
+        exp = SyllogisticReasoningTest(model, dummy=False, num_premises=2, batch_size=20)
+        for n_distr in range(6):
+            results.append(
+                {"model": model, "n_distractors": n_distr} | exp.run("TASK_1", subset_size=200, num_distractors=n_distr)
+            )
+        del exp
 
-    with open("hipotheses.txt", "w") as out_file:
-        print("\n".join(hipotheses), file=out_file)
+    df_results = pd.DataFrame.from_records(results)
+    print(df_results)
+    df_results.to_csv("task1.tsv", sep="\t")
+
+
+
 
 
 if __name__ == "__main__":
