@@ -1,10 +1,10 @@
 import json
 import pandas as pd
-from pathways2nl.pathways import load_hierarchy_genes, get_tree, get_ph_tuples, falsify, add_distractors
+from pathways2nl.pathways import load_hierarchy_genes, get_tree, get_ph_tuples, falsify, add_distractors, SyllogisticScheme
 from pathways2nl.experiments import SyllogisticReasoningTest
 
 
-def gen_datasets():
+def gen_datasets(scheme: SyllogisticScheme):
     pw_hierarchy_genes = load_hierarchy_genes()
 
     # pos_statements, neg_statements, hipotheses = gen_statements(pw_hierarchy_genes)
@@ -24,8 +24,8 @@ def gen_datasets():
     #               out_file, indent=2)
 
     tree = get_tree(pw_hierarchy_genes)
-    ph_tuples = get_ph_tuples(tree, 2, include_genes=True)
-    dummy_ph_tuples = get_ph_tuples(tree, 2, include_genes=True, dummy=True)
+    ph_tuples = get_ph_tuples(tree, scheme, 2)
+    dummy_ph_tuples = get_ph_tuples(tree, scheme, 2, dummy=True)
 
     with open("outputs/sets/gen_modus_ponens_l2.json", "w") as set1_file:
         json.dump(ph_tuples, set1_file, indent=2)
@@ -59,29 +59,32 @@ def gen_datasets():
 def main():
     # gen_datasets()
     models = [
-        "mistralai/Mistral-7B-v0.1",
-        "mistralai/Mistral-7B-Instruct-v0.2",
+        # "mistralai/Mistral-7B-v0.1",
+        # "mistralai/Mistral-7B-Instruct-v0.2",
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
-        "google/gemma-7b",
-        "google/gemma-7b-it",
-        "NousResearch/Meta-Llama-3-8B",
-        "BioMistral/BioMistral-7B",
-        "NousResearch/Meta-Llama-3-8B-Instruct",
-        "NousResearch/Hermes-2-Pro-Llama-3-8B",
+        # "google/gemma-7b",
+        # "google/gemma-7b-it",
+        # "meta-llama/Meta-Llama-3-8B",
+        # "meta-llama/Meta-Llama-3-8B-Instruct",
+        # "BioMistral/BioMistral-7B",
+        # "NousResearch/Hermes-2-Pro-Llama-3-8B",
     ]
 
     results = list()
-    for model in models:
-        exp = SyllogisticReasoningTest(model, dummy=False, num_premises=2, batch_size=20)
-        for n_distr in range(6):
-            results.append(
-                {"model": model, "n_distractors": n_distr} | exp.run("TASK_1", subset_size=200, num_distractors=n_distr)
-            )
-        del exp
+    for task in ["TASK_1"]:
+        for dummy in [False, True]:
+            for model in models:
+                for scheme in SyllogisticScheme:
+                    exp = SyllogisticReasoningTest(model, scheme, dummy=dummy, num_premises=2, batch_size=10)
+                    for n_distr in range(0, 6):
+                        results.append(
+                            {"scheme": scheme, "model": model, "n_distractors": n_distr} | exp.run(task, subset_size=200, num_distractors=n_distr)
+                        )
+                    del exp
 
-    df_results = pd.DataFrame.from_records(results)
-    print(df_results)
-    df_results.to_csv("task1.tsv", sep="\t")
+            df_results = pd.DataFrame.from_records(results)
+            print(df_results)
+            df_results.to_csv(f"{task.lower()}{'-dummy' if dummy else ''}.tsv", sep="\t")
 
 
 

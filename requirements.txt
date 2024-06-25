@@ -8,3 +8,5 @@ transformers
 torch
 accelerate
 openpyxl
+flash_attn
+joblib
