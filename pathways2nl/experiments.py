@@ -5,33 +5,39 @@ from typing import Tuple, List, Dict
 from itertools import chain
 from dynaconf import settings
 from tqdm import tqdm
-from .pathways import load_hierarchy_genes, get_tree, get_ph_tuples, falsify, add_distractors_all, SyllogisticScheme
+from .pathways import (
+    PathwaySetOps, get_ph_tuples, falsify, add_distractors_all, SyllogisticScheme, SyllogisticSchemeVariant
+)
 from .llm import LocalLLM
 
 
 class SyllogisticReasoningTest:
     model_cache = {"locator": None, "llm": None}
 
-    def __init__(self, model_locator: str, scheme: SyllogisticScheme, dummy: bool, num_premises: int = 2,
-                 icl: bool = False, seed: int = 0, batch_size: int = 10):
-        with open(settings["template_file_path"]) as templ_file:
+    def __init__(self, model_locator: str, scheme: SyllogisticScheme, variant: SyllogisticSchemeVariant, dummy: bool,
+                 num_premises: int = 2, icl: bool = False, seed: int = 0, batch_size: int = 10, subset_size: int = 200):
+        with open(settings["prompt_template_file_path"]) as templ_file:
             self.templates = json.load(templ_file)
         self.model_locator = model_locator
         self.scheme = scheme
+        self.variant = variant
         self.dummy = dummy
         self.icl = icl
         self.num_premises = num_premises
         self.seed = seed
         self.batch_size = batch_size
 
-        pw_hierarchy_genes = load_hierarchy_genes()
-        self._pw_tree = get_tree(pw_hierarchy_genes)
+        self._pwops = PathwaySetOps()
 
-        # prems = get_pw_chains(self._pw_tree, 3)
-        # print(prems)
-        # exit(0)
-
-        self._ph_tuples = get_ph_tuples(self._pw_tree, scheme, num_premises, dummy=dummy)
+        ds_fname = f"datasets/{self.conf_string('', 0, False)}_dataset.json"
+        if (os.path.exists(ds_fname)):
+            with open(ds_fname) as ds_file:
+                self._ph_tuples = json.load(ds_file)
+        else:
+            self._ph_tuples = get_ph_tuples(self._pwops, scheme, variant, num_premises, dummy, subset_size)
+            os.makedirs("datasets", exist_ok=True)
+            with open(ds_fname, "w") as ds_file:
+                json.dump(self._ph_tuples, ds_file, indent=2)
 
         if (model_locator == SyllogisticReasoningTest.model_cache["locator"]):
             self._llm = SyllogisticReasoningTest.model_cache["llm"]
@@ -71,17 +77,26 @@ class SyllogisticReasoningTest:
 
         return metrics
 
+    def conf_string(self, task: str, num_distractors: int, icl: bool) -> str:
+        conf_str = f"{task.lower()}-" if task else ""
+        conf_str += f"{self.scheme}-{self.num_premises}-{num_distractors}-{self.variant}"
+        conf_str += f"-{'dummy' if self.dummy else 'real'}{'-icl' if icl else ''}"
+
+        return conf_str
+
+
     def load_logged(self) -> Tuple[List[str], List[str]]:
         answers = list()
         gtd = list()
         if (self._llm.logging_conf):
             task = self._llm.logging_conf['task']
             scheme = self._llm.logging_conf['scheme']
+            variant = self._llm.logging_conf['variant']
             num_prem = self._llm.logging_conf['num_prem']
             num_distr = self._llm.logging_conf['num_distr']
             dummy = self._llm.logging_conf['dummy']
             icl = self._llm.logging_conf['icl']
-            conf_string = f"{task}-{scheme}-{num_prem}-{num_distr}-{'dummy' if dummy else 'real'}{'-icl' if icl else ''}"
+            conf_string = f"{task}-{scheme}-{num_prem}-{num_distr}-{variant}-{'dummy' if dummy else 'real'}{'-icl' if icl else ''}"
             log_fname = f"logs/{self.model_locator.replace('/', '--')}_{conf_string}_prompts_log.jsonl"
 
             if (os.path.exists(log_fname)):
@@ -93,13 +108,13 @@ class SyllogisticReasoningTest:
 
         return answers, gtd
 
-    def task_1(self, ph_tuples: List[Dict[str, str]], subset_size: int, num_distractors: int):
+    def task_1(self, ph_tuples: List[Dict[str, str]], num_distractors: int):
         answers, gtd = self.load_logged()
 
         if (not answers):
             if (num_distractors > 0):
-                add_distractors_all(ph_tuples, self._pw_tree, n=num_distractors, seed=self.seed)
-            tuple_sets = {"True": ph_tuples[:subset_size], "False": falsify(ph_tuples[:subset_size])}
+                add_distractors_all(ph_tuples, self._pwops, n=num_distractors, seed=self.seed)
+            tuple_sets = {"True": ph_tuples, "False": falsify(ph_tuples)}
             results = {truth_val: list() for truth_val in tuple_sets}
             questions = list()
             for truth_val in tuple_sets:
@@ -111,7 +126,7 @@ class SyllogisticReasoningTest:
 
             batch_size = self.batch_size
             for i in tqdm(range(len(questions) // batch_size + int(len(questions) % batch_size > 0)),
-                          desc=f"Prompting [{self.model_locator}] for {self.scheme} with {num_distractors} distractors"):
+                          desc=f"Prompting [{self.model_locator}] for {self.scheme} ({self.variant}) with {num_distractors} distractors"):
                 answers = self._llm.prompt(self.templates["CONTEXT"] + self.templates["TASK_1"],
                                            [q[0] for q in questions[i * batch_size: i * batch_size + batch_size]],
                                            icl_examples if self.icl else "",
@@ -128,13 +143,13 @@ class SyllogisticReasoningTest:
 
         return SyllogisticReasoningTest.calc_metrics_binary(results)
 
-    def task_2(self, ph_tuples: List[Dict[str, str]], subset_size: int, num_distractors: int):
+    def task_2(self, ph_tuples: List[Dict[str, str]], num_distractors: int):
         answers, gtd = self.load_logged()
 
         if (not answers):
             if (num_distractors > 0):
-                add_distractors_all(ph_tuples, self._pw_tree, n=num_distractors, seed=self.seed)
-            tuple_sets = {"True": ph_tuples[:subset_size], "False": falsify(ph_tuples[:subset_size])}
+                add_distractors_all(ph_tuples, self._pwops, n=num_distractors, seed=self.seed)
+            tuple_sets = {"True": ph_tuples, "False": falsify(ph_tuples)}
             truth_results = {truth_val: list() for truth_val in tuple_sets}
             premise_results = {f"P{i + 1}": list() for i in range(self.num_premises + num_distractors)}
             questions = list()
@@ -175,7 +190,7 @@ class SyllogisticReasoningTest:
 
         return metrics
 
-    def run(self, task: str, subset_size: int, num_distractors: int = 0, shuffle: bool = False) -> dict:
+    def run(self, task: str, num_distractors: int = 0, shuffle: bool = False) -> dict:
         ph_tuples = [pht.copy() for pht in self._ph_tuples]
         if (shuffle):
             random.seed(self.seed)
@@ -184,13 +199,25 @@ class SyllogisticReasoningTest:
         self._llm.logging_conf = {
             "task": task.lower(),
             "scheme": self.scheme,
+            "variant": self.variant,
             "num_prem": self.num_premises,
             "num_distr": num_distractors,
             "dummy": self.dummy,
             "icl": self.icl
         }
 
-        metrics = self.task_map[task](ph_tuples, subset_size, num_distractors)
+        if (num_distractors > 0):
+            conf_string = self.conf_string("", num_distractors, False)
+            ds_fname = f"datasets/{conf_string}_dataset.json"
+            if (os.path.exists(ds_fname)):
+                with open(ds_fname) as ds_file:
+                    ph_tuples = json.load(ds_file)
+            else:
+                add_distractors_all(ph_tuples, self._pwops, n=num_distractors, seed=self.seed)
+                with open(ds_fname, "w") as ds_file:
+                    json.dump(ph_tuples, ds_file, indent=2)
+
+        metrics = self.task_map[task](ph_tuples, num_distractors)
 
         return metrics
 

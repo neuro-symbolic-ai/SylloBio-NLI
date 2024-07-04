@@ -12,8 +12,12 @@ class LocalLLM:
         # device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model_locator = model_locator
         self.tokenizer = AutoTokenizer.from_pretrained(model_locator, padding_side="left")
-        self.model = AutoModelForCausalLM.from_pretrained(model_locator, device_map="auto", torch_dtype="auto",
-                                                          attn_implementation="flash_attention_2", offload_buffers=True)
+        if (torch.cuda.is_available() and torch.cuda.device_count() > 0):
+            self.model = AutoModelForCausalLM.from_pretrained(model_locator, device_map="auto", torch_dtype="auto",
+                                                              attn_implementation="flash_attention_2",
+                                                              offload_buffers=True)
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(model_locator, torch_dtype="auto")
 
         if (not self.tokenizer.pad_token):
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -31,6 +35,29 @@ class LocalLLM:
         answers = [ans.strip() for ans in answers]
 
         return answers
+
+    def log_prompt(self, prompts: List[str], decoded: List[str], clean_responses: List[str], gtd: List[str]):
+        task = self.logging_conf['task']
+        scheme = self.logging_conf['scheme']
+        variant = self.logging_conf["variant"]
+        num_prem = self.logging_conf['num_prem']
+        num_distr = self.logging_conf['num_distr']
+        dummy = self.logging_conf['dummy']
+        icl = self.logging_conf['icl']
+        conf_string = f"{task}-{scheme}-{num_prem}-{num_distr}-{variant}-{'dummy' if dummy else 'real'}{'-icl' if icl else ''}"
+        log_fname = f"logs/{self.model_locator.replace('/', '--')}_{conf_string}_prompts_log.jsonl"
+
+        os.makedirs("logs", exist_ok=True)
+        with open(log_fname, "a") as log_file:
+            for i in range(len(prompts)):
+                log_file.write(
+                    json.dumps({
+                        "prompt": prompts[i],
+                        "response": decoded[i],
+                        "cleaned": clean_responses[i],
+                        "gtd": gtd[i]
+                    }) + "\n"
+                )
 
     def prompt(self, template: str, question: Union[str, List[str]], examples: str, gtd: Union[str, List[str]],
                output_size: int) -> List[str]:
@@ -61,26 +88,7 @@ class LocalLLM:
         clean_responses = LocalLLM.clean_answers(decoded)
 
         if (self.logging_conf):
-            task = self.logging_conf['task']
-            scheme = self.logging_conf['scheme']
-            num_prem = self.logging_conf['num_prem']
-            num_distr = self.logging_conf['num_distr']
-            dummy = self.logging_conf['dummy']
-            icl = self.logging_conf['icl']
-            conf_string = f"{task}-{scheme}-{num_prem}-{num_distr}-{'dummy' if dummy else 'real'}{'-icl' if icl else ''}"
-            log_fname = f"logs/{self.model_locator.replace('/', '--')}_{conf_string}_prompts_log.jsonl"
-
-            os.makedirs("logs", exist_ok=True)
-            with open(log_fname, "a") as log_file:
-                for i in range(len(prompts)):
-                    log_file.write(
-                        json.dumps({
-                            "prompt": prompts[i],
-                            "response": decoded[i],
-                            "cleaned": clean_responses[i],
-                            "gtd": gtd[i]
-                        }) + "\n"
-                    )
+            self.log_prompt(prompts, decoded, clean_responses, gtd)
 
         return clean_responses
 

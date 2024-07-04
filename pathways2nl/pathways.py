@@ -1,33 +1,38 @@
+import json
 import random
 import re
 import pandas as pd
-from typing import Tuple, List, Dict, Set
+from typing import Tuple, List, Dict, Set, Union, Optional, Iterable, Self
 from enum import StrEnum, auto
-from collections import Counter
-from itertools import combinations, chain
+from itertools import combinations, permutations
 from string import ascii_uppercase
 from random import shuffle
 from tqdm import tqdm
 from treelib import Tree
 from dynaconf import settings
 from joblib import Parallel, delayed, cpu_count
+from .logic2nl import Logic2NLTranslator
 
-MEMBER_RGX = re.compile(r"is a member of (?P<pw>.+) pathway")
+MEMBER_RGX = re.compile(r"member of (?P<pw>.+?) pathway")
 ALL_MEMBER_RGX = re.compile(r"Every member of (?P<pw1>.+) pathway is( not)? a member of (?P<pw2>.+) pathway")
 EXISTS_MEMBER_RGX = re.compile(r"There is at least one member of (?P<pw1>.+) pathway that is( not)? a member of (?P<pw2>.+) pathway")
 DISJ_MEMBER_RGX = re.compile(r"Every member of (?P<pw1>.+) pathway is either a member of (?P<pwm1>.+) pathway or a member of (?P<pwm2>.+) pathway, or both")
 GENE_RGX = re.compile(r"It is true that Gene (?P<gene>.+) is a member of")
 
-STTM_TEMPLATES = {
-    "all_member_incl": "Every member of {pw1} pathway is a member of {pw2} pathway",
-    "all_member_notincl": "Every member of {pw1} pathway is not a member of {pw2} pathway",
-    "all_member_disj": "Every member of {pw1} pathway is either a member of {pwm1} pathway or a member of {pwm2} pathway, or both",
-    "exist_member_notincl": "There is at least one member of {pw1} pathway that is not a member of {pw2} pathway",
-    "gene_incl": "Gene {gene} is a member of {pw} pathway",
-    "gene_notincl": "Gene {gene} is not a member of {pw} pathway",
-    "gene_hyp_incl": "It is true that Gene {gene} is a member of {pw} pathway",
-    "gene_hyp_notincl": "It is true that Gene {gene} is not a member of {pw} pathway"
-}
+# STTM_TEMPLATES = {
+#     "all_member_incl": "Every member of {pw1} pathway is a member of {pw2} pathway",
+#     "all_member_notincl": "Every member of {pw1} pathway is not a member of {pw2} pathway",
+#     "all_member_disj": "Every member of {pw1} pathway is either a member of {pwm1} pathway or a member of {pwm2} pathway, or both",
+#     "all_member_conj": "Every member of {pw1} pathway is a member of both {pwm1} and {pwm2} pathways",
+#     "conj_member_incl": "Every member of both {pw1} and {pw2} pathways is a member of {pw3} pathway",
+#     "neg_disj_member_incl": "Every member of neither {pw1} or {pw2} pathways is a member of {pw3} pathway",
+#     "exist_member_notincl": "There is at least one member of {pw1} pathway that is not a member of {pw2} pathway",
+#     "gene_incl": "Gene {gene} is a member of {pw} pathway",
+#     "gene_notincl": "Gene {gene} is not a member of {pw} pathway",
+#     "gene_hyp_incl": "It is true that Gene {gene} is a member of {pw} pathway",
+#     "gene_hyp_notincl": "It is true that Gene {gene} is not a member of {pw} pathway",
+#     "gene_hyp_disj_neg": "It is true that either Gene {gene} is not a member of {pw1} pathway or {pw2} pathway, or neither"
+# }
 
 
 class SyllogisticScheme(StrEnum):
@@ -36,264 +41,664 @@ class SyllogisticScheme(StrEnum):
     GEN_CONTRAPOSITION = auto()
     HYPOTHETICAL_SYLLOGISM_1 = auto()
     HYPOTHETICAL_SYLLOGISM_3 = auto()
-    DISJUNCTVE_SYLLOGISM = auto()
+    DISJUNCTIVE_SYLLOGISM = auto()
     GEN_DILEMMA = auto()
 
 
-def load_hierarchy_genes(data_path: str = settings["data_file_path"]):
-    df = pd.read_excel(data_path, dtype={"Length hierarchy": int})
-    df = df[df["Length hierarchy"] <= 5]
-    pw_hierarchy_names = [eval(pwhn) for pwhn in df["pathways_hierarchy_names"].tolist()]
-    pw_genes = [(eval(genes) if (genes.strip()) else []) for genes in df["Genes"].fillna("").tolist()]
-    pw_hierarchy_genes = [(hier, genes) for hier, genes in zip(pw_hierarchy_names, pw_genes) if (genes)]
-
-    return pw_hierarchy_genes
+class SyllogisticSchemeVariant(StrEnum):
+    BASE = auto()
+    NEGATION = auto()
+    COMPLEX_PREDICATES = auto()
+    DE_MORGAN = auto()
 
 
-def gen_statements(pw_hierarchy_genes: List[Tuple[List[str], List[str]]]):
-    pos_statements = list()
-    neg_statements = list()
-    hipotheses = list()
-    for pw_hier, genes in tqdm(pw_hierarchy_genes, desc="Generating statements"):
-        for gene in genes:
-            pos_statements.append(STTM_TEMPLATES["gene_incl"].format(gene=gene, pw=pw_hier[0]))
+class Pathway(Set[str]):
+    def __init__(self, name: str, initial: Iterable[str]):
+        super(Pathway, self).__init__(initial)
+        self.name: str = name
 
-        for j in range(len(pw_hier) - 1):
-            pos_statements.append(STTM_TEMPLATES["all_member_incl"].format(pw1=pw_hier[j], pw2=pw_hier[j + 1]))
-            for k in range(j + 2, len(pw_hier)):
-                pos_statements.append(STTM_TEMPLATES["all_member_incl"].format(pw1=pw_hier[j], pw2=pw_hier[k]))
+    def __repr__(self):
+        return json.dumps({"name": self.name, "genes": list(self)[:10] + (["..."] if len(self) > 10 else [])})
 
-            for gene in genes:
-                hipotheses.append(STTM_TEMPLATES["gene_hyp_incl"].format(gene=gene, pw=pw_hier[j + 1]))
+    @staticmethod
+    def conjunction(*args):
+        """Pathway conjunction: intersection of the respective gene sets"""
+        conj_name = " ^ ".join([(arg.name if isinstance(arg, Pathway) else "?") for arg in args])
+        return Pathway(conj_name, set.intersection(*args))
 
-            for pw_hier_oth, genes_oth in pw_hierarchy_genes:
-                if (len(set(genes).intersection(genes_oth)) == 0):
-                    neg_statements.append(f"No member of {pw_hier[0]} pathway is a member of {pw_hier_oth[0]} pathway")
-                    for gene in genes:
-                        neg_statements.append(STTM_TEMPLATES["gene_notincl"].format(gene=gene, pw=pw_hier_oth[0]))
+    @staticmethod
+    def disjunction(*args):
+        """Pathway disjuction: union of the respective gene sets"""
+        conj_name = " ^ ".join([(arg.name if isinstance(arg, Pathway) else "?") for arg in args])
+        return Pathway(conj_name, set.union(*args))
 
-    pos_statements = list(Counter(pos_statements).keys())
-    neg_statements = list(Counter(neg_statements).keys())
-    hipotheses = list(Counter(hipotheses).keys())
+    def negation(self, *args) -> Self:
+        """Pathway negation: complement of the respective gene set"""
+        universe = set.union(*args)
+        return Pathway(f"¬({self.name})", universe - self)
 
-    return pos_statements, neg_statements, hipotheses
+    def implies(self, other: Self):
+        """Tests pw1(x) -> pw2(x)"""
+        return self.issubset(other)
 
+    def excludes(self, other: Self):
+        """Tests pw1(x) -> ¬pw2(x)"""
+        return self.isdisjoint(other)
 
-def get_statements_by_gene(gene: str, statements: List[str]):
-    gene_sttms = [
-        sttm for sttm in statements
-        if ((sttm.startswith("Gene") or sttm.startswith("It is")) and gene in sttm)
-    ]
-    pathways = set([MEMBER_RGX.search(sttm) for sttm in gene_sttms])
-    member_sttms = Counter()
-    for pw in pathways:
-        member_sttms.update([
-            sttm for sttm in statements
-            if (pw and not(sttm.startswith("Gene") or sttm.startswith("It is")) and pw.group("pw") in sttm)
-        ])
-
-    return gene_sttms + list(member_sttms.keys())
+    def neg_excludes(self, other: Self):
+        """Tests ¬pw1(x) -> ¬pw2(x)"""
+        return other.implies(self)
 
 
-def get_tree(pw_hierarchy_genes: List[Tuple[List[str], List[str]]]):
-    tree = Tree()
-    for pw_hier, genes in tqdm(pw_hierarchy_genes, desc="Loading pathway tree"):
-        parent = None
-        if (pw_hier[-1].strip() == "Disease"):
-            for pw in reversed(pw_hier):
-                pw = pw.strip()
-                if (not tree.contains(pw)):
-                    tree.create_node(pw, pw, parent)
-                parent = pw
-            leaf = tree.get_node(pw_hier[0].strip())
-            if (not leaf.data):
-                leaf.data = list()
-            leaf.data.extend(genes)
+class PathwaySetOps:
+    HIER_SCHEMES = set(SyllogisticScheme) - {SyllogisticScheme.DISJUNCTVE_SYLLOGISM, SyllogisticScheme.GEN_DILEMMA}
 
-    return tree
+    def __init__(self, tree: Optional[Tree] = None):
+        self.tree = tree
+        if (not tree):
+            self.tree = PathwaySetOps.get_tree(PathwaySetOps.load_hierarchy_genes())
+        self.all_genes = set()
+        for node in self.tree.leaves(self.tree.root):
+            if (node.data):
+                self.all_genes.update(node.data)
+        self.transl = Logic2NLTranslator()
 
+    @staticmethod
+    def load_hierarchy_genes(data_path: str = settings["data_file_path"]):
+        df = pd.read_excel(data_path, dtype={"Length hierarchy": int})
+        df = df[df["Length hierarchy"] <= 5]
+        pw_hierarchy_names = [eval(pwhn) for pwhn in df["pathways_hierarchy_names"].tolist()]
+        pw_genes = [(eval(genes) if (genes.strip()) else []) for genes in df["Genes"].fillna("").tolist()]
+        pw_hierarchy_genes = [(hier, genes) for hier, genes in zip(pw_hierarchy_names, pw_genes) if (genes)]
 
-def get_pw_genes(pathway: str, tree: Tree) -> Set[str]:
-    genes = set()
-    for node in tree.leaves(pathway):
-        if (node.data):
-            genes.update(node.data)
+        return pw_hierarchy_genes
 
-    return genes
+    @staticmethod
+    def get_tree(pw_hierarchy_genes: List[Tuple[List[str], List[str]]]) -> Tree:
+        tree = Tree()
+        for pw_hier, genes in tqdm(pw_hierarchy_genes, desc="Loading pathway tree"):
+            parent = None
+            if (pw_hier[-1].strip() == "Disease"):
+                for pw in reversed(pw_hier):
+                    pw = pw.strip()
+                    if (not tree.contains(pw)):
+                        tree.create_node(pw, pw, parent)
+                    parent = pw
+                leaf = tree.get_node(pw_hier[0].strip())
+                if (not leaf.data):
+                    leaf.data = list()
+                leaf.data.extend(genes)
 
-def get_pw_intersect_sets(tree: Tree) -> Tuple[Dict[str, Set[str]], Dict[Tuple[str, str], Set[str]]]:
-    pw_gene_sets = {pw.identifier: get_pw_genes(pw.identifier, tree) for pw in tree.all_nodes()}
-    intersect_pw_sets = dict()
-    for pw1 in pw_gene_sets:
-        for pw2 in pw_gene_sets:
-            if (pw1 != pw2 and (pw2, pw1) not in intersect_pw_sets):
-                intersect_pw_sets[(pw1, pw2)] = pw_gene_sets[pw1].intersection(pw_gene_sets[pw2])
+        return tree
 
-    return pw_gene_sets, intersect_pw_sets
+    def get_pathway(self, pathway_name: str) -> Pathway:
+        pathway = Pathway(pathway_name, [])
+        for node in self.tree.leaves(pathway_name):
+            if (node.data):
+                pathway.update(node.data)
 
+        return pathway
 
-def get_pw_chains(tree: Tree, n: int) -> List[Tuple[str]]:
-    paths = [
-        (tree.parent(node.identifier).identifier,) for node in tree.all_nodes()
-        if (tree.parent(node.identifier) and tree.parent(node.identifier) != tree.root)
-    ]
-    for i in range(n - 1):
-        paths = [
-            p + (tree.parent(p[-1]).identifier,) for p in paths
-            if (tree.parent(p[-1]) and tree.parent(p[-1]) != tree.root)
-        ]
+    def get_all_pathways(self) -> List[Pathway]:
+        return [self.get_pathway(node.identifier) for node in self.tree.all_nodes()]
 
-    return sorted(set(paths))
+    def get_pw_intersect_sets(self) -> Tuple[Dict[str, Pathway], Dict[Tuple[str, str], Pathway]]:
+        pw_gene_sets = {pw.identifier: self.get_pathway(pw.identifier) for pw in self.tree.all_nodes()}
+        intersect_pw_sets = dict()
+        for pw1 in pw_gene_sets:
+            for pw2 in pw_gene_sets:
+                if (pw1 != pw2 and (pw2, pw1) not in intersect_pw_sets):
+                    intersect_pw_sets[(pw1, pw2)] = pw_gene_sets[pw1].intersection(pw_gene_sets[pw2])
 
-def get_premises(pw_chain: Tuple[str]) -> Dict[str, str]:
-    return {
-        f"P{i + 1}": STTM_TEMPLATES["all_member_incl"].format(pw1=pw_chain[i], pw2=pw_chain[i + 1])
-        for i in range(len(pw_chain) - 1)
-    }
+        return pw_gene_sets, intersect_pw_sets
 
-
-def gen_modus_pt(tree: Tree, pw_chain: Tuple[str], dummy: bool, dummy_combs, ph_tuples: List[Dict[str, str]],
-                 all_genes: Set[str], modus: str):
-    genes = get_pw_genes(pw_chain[0], tree)
-
-    if (modus == "ponens"):
-        genes_set = genes
-    else:  # Modus tollens
-        genes_set = list(all_genes - genes)[:len(genes)]
-
-    for gene in genes_set:
-        gene_name = gene if not dummy else "".join(next(dummy_combs))
-        premises = get_premises(pw_chain)
-
-        if (modus == "ponens"):
-            premises |= {f"P{len(premises) + 1}": STTM_TEMPLATES["gene_incl"].format(gene=gene_name, pw=pw_chain[0])}
-            hypothesis = {"C": STTM_TEMPLATES["gene_hyp_incl"].format(gene=gene_name, pw=pw_chain[-1])}
-        else:  # Modus tollens
-            premises |= {f"P{len(premises) + 1}": STTM_TEMPLATES["gene_notincl"].format(gene=gene_name, pw=pw_chain[-1])}
-            hypothesis = {"C": STTM_TEMPLATES["gene_hyp_notincl"].format(gene=gene_name, pw=pw_chain[0])}
-
-        ph_tuples.append(premises | hypothesis)
-
-
-def gen_contraposition(tree: Tree, pw_chain: Tuple[str], ph_tuples: List[Dict[str, str]], disjunct_size: int = 10):
-    genes = get_pw_genes(pw_chain[0], tree)
-    disjunct = [pw.identifier for pw in tree.all_nodes()
-                if (len(get_pw_genes(pw.identifier, tree).intersection(genes)) == 0)]
-    premises = get_premises(pw_chain)
-
-    for disj_pw in disjunct[:disjunct_size]:
-        disj_sttm = STTM_TEMPLATES["all_member_notincl"].format(pw1=pw_chain[-2], pw2=disj_pw)
-        premises[sorted(premises.keys())[-1]] = disj_sttm
-        hypothesis = {"C": STTM_TEMPLATES["all_member_notincl"].format(pw1=disj_pw, pw2=pw_chain[0])}
-
-        ph_tuples.append(premises | hypothesis)
-
-
-def hypothetical_syllogism(pw_chain: Tuple[str], ph_tuples: List[Dict[str, str]], mode: int):
-    premises = get_premises(pw_chain)
-    if (mode == 1):
-        hypothesis = {"C": STTM_TEMPLATES["all_member_incl"].format(pw1=pw_chain[0], pw2=pw_chain[-1])}
-    else:
-        ex_sttm = STTM_TEMPLATES["exist_member_notincl"].format(pw1=pw_chain[-1], pw2=pw_chain[-2])
-        premises[sorted(premises.keys())[-1]] = ex_sttm
-        hypothesis = {"C": STTM_TEMPLATES["exist_member_notincl"].format(pw1=pw_chain[-1], pw2=pw_chain[0])}
-
-    ph_tuples.append(premises | hypothesis)
-
-
-def disjunctive_syllogism(tree: Tree) -> List[Dict[str, str]]:
-    ph_tuples = list()
-    pw_gene_sets, intersect_pw_sets = get_pw_intersect_sets(tree)
-
-    for pw1 in pw_gene_sets:
-        full_membership = [
-            pw2 for pw2 in pw_gene_sets
-            if (pw1 != pw2 and
-                (pw1, pw2) in intersect_pw_sets and
-                (len(intersect_pw_sets[(pw1, pw2)]) == len(pw_gene_sets[pw1])))
-        ]
-        no_membership = [
-            pw2 for pw2 in pw_gene_sets
-            if (pw1 != pw2 and
-                (pw1, pw2) in intersect_pw_sets and
-                len(intersect_pw_sets[(pw1, pw2)]) == 0)
-        ]
-        for pwm1, pwm2 in zip(no_membership, full_membership):
-            ph_tuple = {
-                "P1": STTM_TEMPLATES["all_member_disj"].format(pw1=pw1, pwm1=pwm1, pwm2=pwm2),
-                "P2": STTM_TEMPLATES["all_member_notincl"].format(pw1=pw1, pw2=pwm1),
-                "C": STTM_TEMPLATES["all_member_incl"].format(pw1=pw1, pw2=pwm2)
-            }
-            ph_tuples.append(ph_tuple)
-
-    return ph_tuples
-
-
-def generalised_dilemma(tree: Tree) -> List[Dict[str, str]]:
-    ph_tuples = list()
-    pw_gene_sets, intersect_pw_sets = get_pw_intersect_sets(tree)
-
-    for pw1 in pw_gene_sets:
-        full_membership = [
-            pw2 for pw2 in pw_gene_sets
-            if (pw1 != pw2 and
-                (pw1, pw2) in intersect_pw_sets and
-                (len(intersect_pw_sets[(pw1, pw2)]) == len(pw_gene_sets[pw1])))
-        ]
-
-        for pwm1 in full_membership:
-            for pwm2 in full_membership:
-                ext_membership = [
-                    pwm3 for pwm3 in pw_gene_sets
-                    if (pwm3 not in [pw1, pwm1, pwm2] and
-                        (pwm1, pwm3) in intersect_pw_sets and
-                        (pwm2, pwm3) in intersect_pw_sets and
-                        (len(intersect_pw_sets[(pwm1, pwm3)]) == len(pw_gene_sets[pwm1])) and
-                        (len(intersect_pw_sets[(pwm2, pwm3)]) == len(pw_gene_sets[pwm2])))
+    def get_pw_chains(self, chain_length: int, scheme: SyllogisticScheme,
+                      variant: SyllogisticSchemeVariant, subset_size: int) -> List[Tuple[Pathway, ...]]:
+        pw_chains = list()
+        pathways = list(reversed(self.get_all_pathways()))
+        if (scheme in PathwaySetOps.HIER_SCHEMES):
+            paths = [
+                (self.tree.parent(node.identifier).identifier,) for node in self.tree.all_nodes()
+                if (self.tree.parent(node.identifier) and self.tree.parent(node.identifier) != self.tree.root)
+            ]
+            for i in range(chain_length - 1):
+                paths = [
+                    p + (self.tree.parent(p[-1]).identifier,) for p in paths
+                    if (self.tree.parent(p[-1]) and self.tree.parent(p[-1]) != self.tree.root)
                 ]
 
-                for pwm3 in ext_membership:
-                    ph_tuple = {
-                        "P1": STTM_TEMPLATES["all_member_disj"].format(pw1=pw1, pwm1=pwm1, pwm2=pwm2),
-                        "P2": STTM_TEMPLATES["all_member_incl"].format(pw1=pwm1, pw2=pwm3),
-                        "P3": STTM_TEMPLATES["all_member_incl"].format(pw1=pwm2, pw2=pwm3),
-                        "C": STTM_TEMPLATES["all_member_incl"].format(pw1=pw1, pw2=pwm3)
-                    }
-                    ph_tuples.append(ph_tuple)
+            pw_chains_hier = [tuple([self.get_pathway(pw_name) for pw_name in pw_chain]) for pw_chain in sorted(set(paths))]
 
-    return ph_tuples
-
-
-def get_ph_tuples(tree: Tree, scheme: SyllogisticScheme, length: int = 2, dummy: bool = False) -> List[Dict[str, str]]:
-    ph_tuples = list()
-
-    if (scheme == SyllogisticScheme.DISJUNCTVE_SYLLOGISM):
-        ph_tuples = disjunctive_syllogism(tree)
-    elif (scheme == SyllogisticScheme.GEN_DILEMMA):
-        ph_tuples = generalised_dilemma(tree)
-    else:
-        effective_length = length if ("modus" in scheme) else length + 1
-        pw_chains = get_pw_chains(tree, effective_length)
-        dummy_combs = combinations(ascii_uppercase, r=4)
-
-
-        all_genes = set()
-        for node in tree.leaves(tree.root):
-            if (node.data):
-                all_genes.update(node.data)
-
-        for pw_chain in pw_chains:
-            if (scheme == SyllogisticScheme.GEN_MODUS_PONENS):
-                gen_modus_pt(tree, pw_chain, dummy, dummy_combs, ph_tuples, all_genes, "ponens")
-            elif (scheme == SyllogisticScheme.GEN_MODUS_TOLLENS):
-                gen_modus_pt(tree, pw_chain, dummy, dummy_combs, ph_tuples, all_genes, "tollens")
+            if (scheme in [SyllogisticScheme.GEN_MODUS_PONENS, SyllogisticScheme.GEN_MODUS_TOLLENS]):
+                if (variant == SyllogisticSchemeVariant.BASE):
+                    pw_chains = pw_chains_hier
+                if (variant == SyllogisticSchemeVariant.NEGATION):
+                    for pwc in pw_chains_hier:
+                        pw_chains.extend([pwc[:-1] + (pw,) for pw in pathways if pwc[-2].excludes(pw)][:2])
+                elif (variant in ["complex_predicates", "de_morgan"]):
+                    if (scheme == SyllogisticScheme.GEN_MODUS_PONENS):
+                        if (variant == SyllogisticSchemeVariant.COMPLEX_PREDICATES):
+                            for pw_f, pw_h in combinations(pathways, 2):
+                                left_term = Pathway.conjunction(pw_f, pw_h)
+                                pw_chains.extend([(pw_f, pw_g, pw_h) for pw_g in pathways
+                                                  if (pw_g.name != pw_f.name and
+                                                      pw_g.name != pw_h.name and
+                                                      left_term.implies(pw_g))])
+                                if (len(pw_chains) >= subset_size):
+                                    break
+                        else:  # De Morgan variant
+                            for pw_f, pw_h in combinations(pathways, 2):
+                                left_term = Pathway.disjunction(pw_f, pw_h).negation(self.all_genes)
+                                pw_chains.extend([(pw_f, pw_g, pw_h) for pw_g in pathways
+                                                  if (pw_g.name != pw_f.name and
+                                                      pw_g.name != pw_h.name and
+                                                      left_term.implies(pw_g))])
+                                if (len(pw_chains) >= subset_size):
+                                    break
+                    else:  # Modus tollens
+                        for pw_g, pw_h in combinations(pathways, 2):
+                            right_term = Pathway.conjunction(pw_g, pw_h)
+                            pw_chains.extend([(pw_f, pw_g, pw_h) for pw_f in pathways
+                                              if (pw_f.name != pw_g.name and
+                                                  pw_f.name != pw_h.name and
+                                                  pw_f.implies(right_term))])
+                            if (len(pw_chains) >= subset_size):
+                                break
             elif (scheme == SyllogisticScheme.GEN_CONTRAPOSITION):
-                gen_contraposition(tree, pw_chain, ph_tuples)
-            elif (scheme.startswith("hypothetical_syllogism")):
-                mode = int(scheme.split("_")[-1])
-                hypothetical_syllogism(pw_chain, ph_tuples, mode)
+                if (variant == SyllogisticSchemeVariant.BASE):
+                    for pwc in pw_chains_hier:
+                        pw_chains.extend([pwc[:-1] + (pw,) for pw in pathways if pwc[-2].excludes(pw)][:2])
+                elif (variant == SyllogisticSchemeVariant.NEGATION):
+                    pw_chains = pw_chains_hier
+                elif (variant in ["complex_predicates", "de_morgan"]):
+                    for pw_f, pw_h in combinations(pathways, 2):
+                        left_term = Pathway.conjunction(pw_f, pw_h)
+                        pw_chains.extend([(pw_f, pw_g, pw_h) for pw_g in pathways
+                                          if (pw_g.name != pw_f.name and
+                                              pw_g.name != pw_h.name and
+                                              left_term.excludes(pw_g))])
+                        if (len(pw_chains) >= subset_size):
+                            break
+            elif (scheme == SyllogisticScheme.HYPOTHETICAL_SYLLOGISM_1):
+                if (variant == SyllogisticSchemeVariant.BASE):
+                    pw_chains = pw_chains_hier
+                if (variant == SyllogisticSchemeVariant.NEGATION):
+                    for pw_g, pw_h in combinations(pathways, 2):
+                        sec_prop = pw_g.negation(self.all_genes).implies(pw_h)
+                        if (sec_prop):
+                            pw_chains.extend([(pw_f, pw_g, pw_h) for pw_f in pathways
+                                              if (pw_f.name != pw_g.name and
+                                                  pw_f.name != pw_h.name and
+                                                  pw_f.excludes(pw_g))])
+                            if (len(pw_chains) >= subset_size):
+                                break
+                elif (variant == SyllogisticSchemeVariant.COMPLEX_PREDICATES):
+                    for pw_g, pw_i in combinations(pathways, 2):
+                        conj_gi = Pathway.conjunction(pw_g, pw_i)
+                        pw_chains.extend([(pw_f, pw_g, pw_h, pw_i) for pw_f, pw_h in permutations(pathways, 2)
+                                          if (pw_f.name != pw_g.name and pw_f.name != pw_i.name and
+                                              pw_h.name != pw_g.name and pw_h.name != pw_i.name and
+                                              pw_f.implies(pw_g) and pw_f.implies(pw_i) and conj_gi.implies(pw_h))])
+                        if (len(pw_chains) >= subset_size):
+                            break
+                    # pw_chains = [
+                    #     (pw_f, pw_g, pw_h, pw_i) for pw_f, pw_g, pw_h, pw_i in combinations(self.get_all_pathways(), 4)
+                    #     if (pw_f.implies(pw_g) and pw_f.implies(pw_i) and Pathway.conjunction(pw_g, pw_i).implies(pw_h))
+                    # ]
+                elif (variant == SyllogisticSchemeVariant.DE_MORGAN):
+                    for pw_f, pw_i in combinations(pathways, 2):
+                        conj_neg_fi = Pathway.conjunction(pw_f.negation(self.all_genes), pw_i.negation(self.all_genes))
+                        pw_chains.extend([(pw_f, pw_g, pw_h, pw_i) for pw_g, pw_h in permutations(pathways, 2)
+                                          if (pw_g.name != pw_f.name and pw_g.name != pw_i.name and
+                                              pw_h.name != pw_f.name and pw_h.name != pw_i.name and
+                                              conj_neg_fi.implies(pw_g) and pw_g.implies(pw_h))])
+                        if (len(pw_chains) >= subset_size):
+                            break
 
-    return ph_tuples
+                    # pw_chains = [
+                    #     (pw_f, pw_g, pw_h, pw_i) for pw_f, pw_g, pw_h, pw_i in combinations(self.get_all_pathways(), 4)
+                    #     if (Pathway.conjunction(pw_f.negation(self.all_genes), pw_i.negation(self.all_genes)).implies(pw_g) and
+                    #         pw_g.implies(pw_h))
+                    # ]
+            elif (scheme == SyllogisticScheme.HYPOTHETICAL_SYLLOGISM_3):
+                if (variant == SyllogisticSchemeVariant.BASE):
+                    for pw_h, pw_g in combinations(pathways, 2):
+                        sec_prop = len(Pathway.conjunction(pw_h, pw_g.negation(self.all_genes))) > 0
+                        if (sec_prop):
+                            pw_chains.extend([(pw_f, pw_g, pw_h) for pw_f in pathways
+                                              if (pw_f.name != pw_g.name and
+                                                  pw_f.name != pw_h.name and
+                                                  pw_f.implies(pw_g))])
+                            if (len(pw_chains) >= subset_size):
+                                break
+
+                    # pw_chains = [
+                    #     (pw_f, pw_g, pw_h) for pw_f, pw_g, pw_h in combinations(self.get_all_pathways(), 3)
+                    #     if (pw_f.implies(pw_g) and len(Pathway.conjunction(pw_h, pw_g.negation(self.all_genes))) > 0)
+                    # ]
+                elif (variant == SyllogisticSchemeVariant.NEGATION):
+                    for pw_h, pw_g in combinations(pathways, 2):
+                        sec_prop = len(Pathway.conjunction(pw_h, pw_g.negation(self.all_genes))) > 0
+                        if (sec_prop):
+                            pw_chains.extend([(pw_f, pw_g, pw_h) for pw_f in pathways
+                                              if (pw_f.name != pw_g.name and
+                                                  pw_f.name != pw_h.name and
+                                                  pw_f.negation(self.all_genes).implies(pw_g))])
+                            if (len(pw_chains) >= subset_size):
+                                break
+
+                    # pw_chains = [
+                    #     (pw_f, pw_g, pw_h) for pw_f, pw_g, pw_h in combinations(self.get_all_pathways(), 3)
+                    #     if (pw_f.negation(self.all_genes).implies(pw_g) and
+                    #         len(Pathway.conjunction(pw_h, pw_g.negation(self.all_genes))) > 0)
+                    # ]
+                elif (variant == SyllogisticSchemeVariant.COMPLEX_PREDICATES):
+                    for pw_g, pw_i in combinations(pathways, 2):
+                        neg_conj_gi = Pathway.conjunction(pw_g, pw_i).negation(self.all_genes)
+                        for pw_h in pathways:
+                            if (pw_h.name != pw_g.name and pw_h.name != pw_i.name):
+                                thr_prop = len(Pathway.conjunction(pw_h, neg_conj_gi)) > 0
+                                if (thr_prop):
+                                    pw_chains.extend([(pw_f, pw_g, pw_h, pw_i) for pw_f in pathways
+                                                     if (pw_f.name != pw_g.name and
+                                                         pw_f.name != pw_h.name and
+                                                         pw_f.name != pw_i.name and
+                                                         pw_f.implies(pw_g) and pw_f.implies(pw_i))])
+                                    if (len(pw_chains) >= subset_size):
+                                        break
+                        if (len(pw_chains) >= subset_size):
+                            break
+
+                    # pw_chains = [
+                    #     (pw_f, pw_g, pw_h, pw_i) for pw_f, pw_g, pw_h, pw_i in combinations(self.get_all_pathways(), 4)
+                    #     if (pw_f.implies(pw_g) and pw_f.implies(pw_i) and
+                    #         len(Pathway.conjunction(pw_h, Pathway.conjunction(pw_g, pw_i).negation(self.all_genes))) > 0)
+                    # ]
+                else:  # De Morgan variant
+                    for pw_g, pw_i in combinations(pathways, 2):
+                        conj_neg_gi = Pathway.disjunction(pw_g.negation(self.all_genes), pw_i.negation(self.all_genes))
+                        for pw_h in pathways:
+                            if (pw_h.name != pw_g.name and pw_h.name != pw_i.name):
+                                thr_prop = len(Pathway.conjunction(pw_h, conj_neg_gi)) > 0
+                                if (thr_prop):
+                                    pw_chains.extend([(pw_f, pw_g, pw_h, pw_i) for pw_f in pathways
+                                                     if (pw_f.name != pw_g.name and
+                                                         pw_f.name != pw_h.name and
+                                                         pw_f.name != pw_i.name and
+                                                         pw_f.implies(pw_g) and pw_f.implies(pw_i))])
+                                    if (len(pw_chains) >= subset_size):
+                                        break
+                        if (len(pw_chains) >= subset_size):
+                            break
+
+                    # pw_chains = [
+                    #     (pw_f, pw_g, pw_h, pw_i) for pw_f, pw_g, pw_h, pw_i in combinations(self.get_all_pathways(), 4)
+                    #     if (pw_f.implies(pw_g) and pw_f.implies(pw_i) and
+                    #         len(Pathway.conjunction(pw_h, Pathway.disjunction(pw_g.negation(self.all_genes), pw_i.negation(self.all_genes)))) > 0)
+                    # ]
+        elif (scheme == SyllogisticScheme.DISJUNCTVE_SYLLOGISM):
+            if (variant == SyllogisticSchemeVariant.BASE):
+                for pw_g, pw_h in combinations(pathways, 2):
+                    disj_gh = Pathway.disjunction(pw_g, pw_h)
+                    pw_chains.extend([(pw_f, pw_g, pw_h) for pw_f in pathways
+                                      if (pw_f.name != pw_g.name and
+                                          pw_f.name != pw_h.name and
+                                          pw_f.implies(disj_gh) and pw_f.excludes(pw_g))])
+                    if (len(pw_chains) >= subset_size):
+                        break
+
+                # pw_chains = [
+                #     (pw_f, pw_g, pw_h) for pw_f, pw_g, pw_h in combinations(self.get_all_pathways(), 3)
+                #     if (pw_f.implies(Pathway.disjunction(pw_g, pw_h)) and pw_f.excludes(pw_g))
+                # ]
+            elif (variant == SyllogisticSchemeVariant.NEGATION):
+                for pw_g, pw_h in combinations(pathways, 2):
+                    disj_gh = Pathway.disjunction(pw_g, pw_h)
+                    pw_chains.extend([(pw_f, pw_g, pw_h) for pw_f in pathways
+                                      if (pw_f.name != pw_g.name and
+                                          pw_f.name != pw_h.name and
+                                          pw_f.implies(disj_gh) and pw_g.excludes(pw_f))])
+                    if (len(pw_chains) >= subset_size):
+                        break
+
+                # pw_chains = [
+                #     (pw_f, pw_g, pw_h) for pw_f, pw_g, pw_h in combinations(self.get_all_pathways(), 3)
+                #     if (pw_f.implies(Pathway.disjunction(pw_g, pw_h)) and pw_g.excludes(pw_f))
+                # ]
+            elif (variant == SyllogisticSchemeVariant.COMPLEX_PREDICATES):
+                for pw_g, pw_h, pw_i in combinations(pathways, 3):
+                    conj_ghi = Pathway.disjunction(pw_g, pw_h, pw_i)
+                    pw_chains.extend([(pw_f, pw_g, pw_h, pw_i) for pw_f in pathways
+                                      if (pw_f.name != pw_g.name and
+                                          pw_f.name != pw_h.name and
+                                          pw_f.name != pw_i.name and
+                                          pw_f.implies(conj_ghi) and pw_f.excludes(pw_g) and pw_f.excludes(pw_i))])
+                    if (len(pw_chains) >= subset_size):
+                        break
+
+                # pw_chains = [
+                #     (pw_f, pw_g, pw_h, pw_i) for pw_f, pw_g, pw_h, pw_i in combinations(self.get_all_pathways(), 4)
+                #     if (pw_f.implies(Pathway.disjunction(pw_g, pw_h, pw_i)) and
+                #         pw_f.excludes(pw_g) and
+                #         pw_f.excludes(pw_i))
+                # ]
+            else:  # De Morgan variant
+                for pw_f, pw_i in combinations(pathways, 2):
+                    conj_fi = Pathway.conjunction(pw_f, pw_i)
+                    disj_neg_fi = Pathway.disjunction(pw_f.negation(self.all_genes), pw_i.negation(self.all_genes))
+                    for pw_g, pw_h in combinations(pathways, 2):
+                        if (pw_g.name != pw_f.name and pw_g.name != pw_i.name and
+                            pw_h.name != pw_f.name and pw_h.name != pw_i.name):
+                            disj_gh = Pathway.disjunction(pw_g, pw_h)
+                            if (conj_fi.implies(disj_gh) and pw_g.implies(disj_neg_fi)):
+                                pw_chains.append((pw_f, pw_g, pw_h, pw_i))
+                                if (len(pw_chains) >= subset_size):
+                                    break
+                    if (len(pw_chains) >= subset_size):
+                        break
+
+                # pw_chains = [
+                #     (pw_f, pw_g, pw_h, pw_i) for pw_f, pw_g, pw_h, pw_i in combinations(self.get_all_pathways(), 4)
+                #     if (Pathway.conjunction(pw_f, pw_i).implies(Pathway.disjunction(pw_g, pw_h)) and
+                #         pw_g.implies(Pathway.disjunction(pw_f.negation(self.all_genes), pw_i.negation(self.all_genes))))
+                # ]
+        elif (scheme == SyllogisticScheme.GEN_DILEMMA):
+            if (variant == SyllogisticSchemeVariant.BASE):
+                for pw_g, pw_h in combinations(pathways, 2):
+                    disj_gh = Pathway.disjunction(pw_g, pw_h)
+                    for pw_j in pathways:
+                        sec_prop = pw_g.implies(pw_j)
+                        thr_prop = pw_h.implies(pw_j)
+                        if (pw_j.name != pw_g.name and pw_j.name != pw_h.name and sec_prop and thr_prop):
+                            pw_chains.extend([(pw_f, pw_g, pw_h, pw_j) for pw_f in pathways
+                                              if (pw_f.name != pw_g.name and
+                                                  pw_f.name != pw_h.name and
+                                                  pw_f.name != pw_j.name and
+                                                  pw_f.implies(disj_gh))])
+                            if (len(pw_chains) >= subset_size):
+                                break
+                    if (len(pw_chains) >= subset_size):
+                        break
+
+                # pw_chains = [
+                #     (pw_f, pw_g, pw_h, pw_j) for pw_f, pw_g, pw_h, pw_j in combinations(self.get_all_pathways(), 4)
+                #     if (pw_f.implies(Pathway.disjunction(pw_g, pw_h)) and pw_g.implies(pw_j) and pw_h.implies(pw_j))
+                # ]
+            elif (variant == SyllogisticSchemeVariant.NEGATION):
+                for pw_g, pw_h in combinations(pathways, 2):
+                    disj_gh = Pathway.disjunction(pw_g, pw_h)
+                    for pw_j in pathways:
+                        sec_prop = pw_j.excludes(pw_g)
+                        thr_prop = pw_j.excludes(pw_h)
+                        if (pw_j.name != pw_g.name and pw_j.name != pw_h.name and sec_prop and thr_prop):
+                            pw_chains.extend([(pw_f, pw_g, pw_h, pw_j) for pw_f in pathways
+                                              if (pw_f.name != pw_g.name and
+                                                  pw_f.name != pw_h.name and
+                                                  pw_f.name != pw_j.name and
+                                                  pw_f.implies(disj_gh))])
+                            if (len(pw_chains) >= subset_size):
+                                break
+                    if (len(pw_chains) >= subset_size):
+                        break
+
+                # pw_chains = [
+                #     (pw_f, pw_g, pw_h, pw_j) for pw_f, pw_g, pw_h, pw_j in combinations(self.get_all_pathways(), 4)
+                #     if (pw_f.implies(Pathway.disjunction(pw_g, pw_h)) and pw_j.excludes(pw_g) and pw_j.excludes(pw_h))
+                # ]
+            elif (variant == SyllogisticSchemeVariant.COMPLEX_PREDICATES):
+                for pw_g, pw_h, pw_i in combinations(pathways, 3):
+                    disj_ghi = Pathway.disjunction(pw_g, pw_h, pw_i)
+                    for pw_f in pathways:
+                        if (pw_f.name != pw_g.name and pw_f.name != pw_h.name and
+                            pw_f.name != pw_i.name and pw_f.implies(disj_ghi)):
+                            for pw_j in pathways:
+                                if (pw_j.name != pw_f.name and pw_j.name != pw_g.name and
+                                    pw_j.name != pw_h.name and pw_j.name != pw_i.name and
+                                    pw_g.implies(pw_j) and pw_h.implies(pw_j)):
+                                    pw_chains.append((pw_f, pw_g, pw_h, pw_i, pw_j))
+                                    if (len(pw_chains) >= subset_size): break
+                        if (len(pw_chains) >= subset_size): break
+                    if (len(pw_chains) >= subset_size): break
+
+                # for pw_g in pathways:
+                #     for pw_j in [pw for pw in pathways if (pw.name != pw_g.name)]:
+                #         if (pw_g.implies(pw_j)):
+                #             pw_oth = [pw_g.name, pw_j.name]
+                #             for pw_h in [pw for pw in pathways if (pw.name not in pw_oth)]:
+                #                 if (pw_h.name not in pw_oth and pw_h.implies(pw_j)):
+                #                     pw_oth = [pw_g.name, pw_j.name, pw_h.name]
+                #                     for pw_i in [pw for pw in pathways if (pw.name not in pw_oth)]:
+                #                         if (pw_i not in pw_oth):
+                #                             disj_ghi = Pathway.disjunction(pw_g, pw_h, pw_i)
+                #                             pw_oth = [pw_g.name, pw_j.name, pw_h.name, pw_i.name]
+                #                             for pw_f in [pw for pw in pathways if (pw.name not in pw_oth)]:
+                #                                 if (pw_f.implies(disj_ghi)):
+                #                                     pw_chains.append((pw_f, pw_g, pw_h, pw_i, pw_j))
+                #                                     if (len(pw_chains) >= subset_size):
+                #                                         break
+                #                         if (len(pw_chains) >= subset_size):
+                #                             break
+                #                 if (len(pw_chains) >= subset_size):
+                #                     break
+
+                # pw_chains = [
+                #     (pw_f, pw_g, pw_h, pw_i, pw_j)
+                #     for pw_f, pw_g, pw_h, pw_i, pw_j in combinations(self.get_all_pathways(), 5)
+                #     if (pw_f.implies(Pathway.disjunction(pw_g, pw_h, pw_i)) and
+                #         pw_g.implies(pw_j) and pw_h.implies(pw_j))
+                # ]
+            else:  # De Morgan variant
+                for pw_g, pw_h in combinations(pathways, 2):
+                    neg_conj_gh = Pathway.conjunction(pw_g, pw_h).negation(self.all_genes)
+                    pw_g_neg = pw_g.negation(self.all_genes)
+                    pw_h_neg = pw_h.negation(self.all_genes)
+                    for pw_f in pathways:
+                        if (pw_f.name != pw_g.name and pw_f.name != pw_h.name and pw_f.implies(neg_conj_gh)):
+                            pw_chains.extend([(pw_f, pw_g, pw_h, pw_j) for pw_j in pathways
+                                              if (pw_j.name != pw_f.name and
+                                                  pw_j.name != pw_g.name and
+                                                  pw_j.name != pw_h.name and
+                                                  pw_g_neg.implies(pw_j) and pw_h_neg.implies(pw_j))])
+                            if (len(pw_chains) >= subset_size):
+                                break
+                    if (len(pw_chains) >= subset_size):
+                        break
+
+
+                # pw_chains = [
+                #     (pw_f, pw_g, pw_h, pw_j) for pw_f, pw_g, pw_h, pw_j in combinations(self.get_all_pathways(), 4)
+                #     if (pw_f.implies(Pathway.conjunction(pw_g, pw_h).negation(self.all_genes)) and
+                #         pw_g.negation(self.all_genes).implies(pw_j) and
+                #         pw_h.negation(self.all_genes).implies(pw_j))
+                # ]
+
+        return pw_chains[:subset_size]
+
+    def get_genes_set(self, pw_chain: Tuple[Pathway, ...], scheme: SyllogisticScheme,
+                      variant: SyllogisticSchemeVariant) -> Set[str]:
+        if (variant in [SyllogisticSchemeVariant.BASE, SyllogisticSchemeVariant.NEGATION]):
+            if (scheme == SyllogisticScheme.GEN_MODUS_PONENS):
+                genes_set = pw_chain[0]
+            else: # Modus tollens
+                if (variant == SyllogisticSchemeVariant.BASE):
+                    genes_set = pw_chain[-1].negation(self.all_genes)
+                else:
+                    genes_set = pw_chain[-1]
+        elif (variant == SyllogisticSchemeVariant.COMPLEX_PREDICATES):
+            if (scheme == SyllogisticScheme.GEN_MODUS_PONENS):
+                genes_set = Pathway.conjunction(pw_chain[0], pw_chain[2])
+            else:  # Modus tollens
+                genes_set = pw_chain[1].negation(self.all_genes)
+        else: # De Morgan variant
+            if (scheme == SyllogisticScheme.GEN_MODUS_PONENS):
+                genes_set = Pathway.conjunction(pw_chain[0].negation(self.all_genes),
+                                                pw_chain[2].negation(self.all_genes))
+            else:  # Modus tollens
+                genes_set = Pathway.disjunction(pw_chain[1].negation(self.all_genes),
+                                                pw_chain[2].negation(self.all_genes))
+
+        return genes_set
+
+    def get_premises(self, pw_chain: Tuple[Pathway, ...], scheme: SyllogisticScheme,
+                     variant: SyllogisticSchemeVariant, gene_name: str = "") -> Dict[str, str]:
+        premises = dict()
+        transl = self.transl
+
+        if (scheme in PathwaySetOps.HIER_SCHEMES and variant in ["base", "negation"]):
+            premises = {
+                f"P{i + 1}": transl.translate("∀x:Ax→Bx", A=pw_chain[i].name, B=pw_chain[i + 1].name)
+                for i in range(len(pw_chain) - 1)
+            }
+
+        if (scheme == SyllogisticScheme.GEN_MODUS_PONENS and variant in ["base", "negation"]):
+            if (variant == SyllogisticSchemeVariant.NEGATION):
+                premises[sorted(premises.keys())[-1]] = transl.translate("∀x:Ax→¬Bx", A=pw_chain[-2].name, B=pw_chain[-1].name)
+            premises |= {f"P{len(premises) + 1}": transl.translate("Aa", a=gene_name, A=pw_chain[0].name)}
+        elif (scheme == SyllogisticScheme.GEN_MODUS_PONENS and variant == SyllogisticSchemeVariant.COMPLEX_PREDICATES):
+            premises = {"P1": transl.translate("∀x:(Ax∧Bx)→Cx", A=pw_chain[0].name, B=pw_chain[2].name, C=pw_chain[1].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("Aa", a=gene_name, A=pw_chain[0].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("Aa", a=gene_name, A=pw_chain[2].name)}
+        elif (scheme == SyllogisticScheme.GEN_MODUS_PONENS and variant == SyllogisticSchemeVariant.DE_MORGAN):
+            premises = {"P1": transl.translate("∀x:¬(Ax∧Bx)→Cx", A=pw_chain[0].name, B=pw_chain[2].name, C=pw_chain[1].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("¬Aa", a=gene_name, A=pw_chain[0].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("¬Aa", a=gene_name, A=pw_chain[2].name)}
+        elif (scheme == SyllogisticScheme.GEN_MODUS_TOLLENS and variant == SyllogisticSchemeVariant.BASE):
+            premises |= {f"P{len(premises) + 1}": transl.translate("¬Aa", a=gene_name, A=pw_chain[-1].name)}
+        elif (scheme == SyllogisticScheme.GEN_MODUS_TOLLENS and variant == SyllogisticSchemeVariant.NEGATION):
+            premises |= {f"P{len(premises) + 1}": transl.translate("Aa", a=gene_name, A=pw_chain[-1].name)}
+        elif (scheme == SyllogisticScheme.GEN_MODUS_TOLLENS and variant == SyllogisticSchemeVariant.COMPLEX_PREDICATES):
+            premises = {"P1": transl.translate("∀x:Ax→(Bx∧Cx)", A=pw_chain[0].name, B=pw_chain[1].name, C=pw_chain[2].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("¬Aa", a=gene_name, A=pw_chain[1].name)}
+        elif (scheme == SyllogisticScheme.GEN_MODUS_TOLLENS and variant == SyllogisticSchemeVariant.DE_MORGAN):
+            premises = {"P1": transl.translate("∀x:Ax→(Bx∧Cx)", A=pw_chain[0].name, B=pw_chain[1].name, C=pw_chain[2].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("¬Aav¬Ba", a=gene_name, A=pw_chain[1].name, B=pw_chain[2].name)}
+        elif (scheme == SyllogisticScheme.GEN_CONTRAPOSITION and variant == SyllogisticSchemeVariant.BASE):
+            premises[sorted(premises.keys())[-1]] = transl.translate("∀x:Ax→¬Bx", A=pw_chain[-2].name, B=pw_chain[-1].name)
+        elif (scheme == SyllogisticScheme.GEN_CONTRAPOSITION and variant in ["complex_predicates", "de_morgan"]):
+            premises = {"P1": transl.translate("∀x:(Ax∧Bx)→¬Cx", A=pw_chain[0].name, B=pw_chain[2].name, C=pw_chain[1].name)}
+        elif (scheme == SyllogisticScheme.HYPOTHETICAL_SYLLOGISM_1 and variant == SyllogisticSchemeVariant.NEGATION):
+            premises[sorted(premises.keys())[-2]] = transl.translate("∀x:Ax→¬Bx", A=pw_chain[-3].name, B=pw_chain[-2].name)
+            premises[sorted(premises.keys())[-1]] = transl.translate("∀x:¬Ax→Bx", A=pw_chain[-2].name, B=pw_chain[-1].name)
+        elif (scheme == SyllogisticScheme.HYPOTHETICAL_SYLLOGISM_1 and variant == SyllogisticSchemeVariant.COMPLEX_PREDICATES):
+            premises = {"P1": transl.translate("∀x:Ax→Bx", A=pw_chain[0].name, B=pw_chain[1].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("∀x:Ax→Bx", A=pw_chain[0].name, B=pw_chain[3].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("∀x:(Ax∧Bx)→Cx", A=pw_chain[1].name,
+                                                                   B=pw_chain[3].name, C=pw_chain[2].name)}
+        elif (scheme == SyllogisticScheme.HYPOTHETICAL_SYLLOGISM_1 and variant == SyllogisticSchemeVariant.DE_MORGAN):
+            premises = {"P1": transl.translate("∀x:¬(AxvBx)→Cx", A=pw_chain[0].name, B=pw_chain[3].name, C=pw_chain[1].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("∀x:Ax→Bx", A=pw_chain[1].name, B=pw_chain[2].name)}
+        elif (scheme == SyllogisticScheme.HYPOTHETICAL_SYLLOGISM_3 and variant == SyllogisticSchemeVariant.BASE):
+            premises = {"P1": transl.translate("∀x:Ax→Bx", A=pw_chain[0].name, B=pw_chain[1].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("∃x:Ax∧¬Bx", A=pw_chain[2].name, B=pw_chain[1].name)}
+        elif (scheme == SyllogisticScheme.HYPOTHETICAL_SYLLOGISM_3 and variant == SyllogisticSchemeVariant.NEGATION):
+            premises = {"P1": transl.translate("∀x:¬Ax→Bx", A=pw_chain[0].name, B=pw_chain[1].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("∃x:Ax∧¬Bx", A=pw_chain[2].name, B=pw_chain[1].name)}
+        elif (scheme == SyllogisticScheme.HYPOTHETICAL_SYLLOGISM_3 and variant in ["complex_predicates", "de_morgan"]):
+            premises = {"P1": transl.translate("∀x:Ax→Bx", A=pw_chain[0].name, B=pw_chain[1].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("∀x:Ax→Bx", A=pw_chain[0].name, B=pw_chain[3].name)}
+            if (variant == SyllogisticSchemeVariant.COMPLEX_PREDICATES):
+                premises |= {f"P{len(premises) + 1}": transl.translate("∃x:Ax∧(¬Bxv¬Cx)", A=pw_chain[2].name,
+                                                                       B=pw_chain[1].name, C=pw_chain[3].name)}
+            else:  # De Morgan variant
+                premises |= {f"P{len(premises) + 1}": transl.translate("∃x:Ax∧¬(Bx∧Cx)", A=pw_chain[2].name,
+                                                                       B=pw_chain[1].name, C=pw_chain[3].name)}
+        elif (scheme == SyllogisticScheme.DISJUNCTVE_SYLLOGISM and variant in ["base", "negation"]):
+            premises = {"P1": transl.translate("∀x:Ax→(BxvCx)", A=pw_chain[0].name, B=pw_chain[1].name, C=pw_chain[2].name)}
+            if (variant == SyllogisticSchemeVariant.BASE):
+                premises |= {f"P{len(premises) + 1}": transl.translate("∀x:Ax→¬Bx", A=pw_chain[0].name, B=pw_chain[1].name)}
+            else:  # Negation variant
+                premises |= {f"P{len(premises) + 1}": transl.translate("∀x:Ax→¬Bx", A=pw_chain[1].name, B=pw_chain[0].name)}
+        elif (scheme == SyllogisticScheme.DISJUNCTVE_SYLLOGISM and variant == SyllogisticSchemeVariant.COMPLEX_PREDICATES):
+            premises = {"P1": transl.translate("∀x:Ax→(BxvCxvDx)", A=pw_chain[0].name, B=pw_chain[1].name,
+                                               C=pw_chain[2].name, D=pw_chain[3].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("∀x:Ax→¬Bx", A=pw_chain[0].name, B=pw_chain[1].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("∀x:Ax→¬Bx", A=pw_chain[0].name, B=pw_chain[3].name)}
+        elif (scheme == SyllogisticScheme.DISJUNCTVE_SYLLOGISM and variant in ["base", "negation"]):
+            premises = {"P1": transl.translate("∀x:Ax→(BxvCx)", A=pw_chain[0].name, B=pw_chain[1].name,
+                                               C=pw_chain[2].name)}
+            if (variant == SyllogisticSchemeVariant.BASE):
+                premises |= {f"P{len(premises) + 1}": transl.translate("∀x:Ax→Bx", A=pw_chain[1].name, B=pw_chain[3].name)}
+                premises |= {f"P{len(premises) + 1}": transl.translate("∀x:Ax→Bx", A=pw_chain[2].name, B=pw_chain[3].name)}
+            else:  # Negation variant
+                premises |= {f"P{len(premises) + 1}": transl.translate("∀x:Ax→¬Bx", A=pw_chain[3].name, B=pw_chain[1].name)}
+                premises |= {f"P{len(premises) + 1}": transl.translate("∀x:Ax→¬Bx", A=pw_chain[3].name, B=pw_chain[2].name)}
+        elif (scheme == SyllogisticScheme.GEN_DILEMMA and variant == SyllogisticSchemeVariant.COMPLEX_PREDICATES):
+            premises = {"P1": transl.translate("∀x:Ax→(BxvCxvDx)", A=pw_chain[0].name, B=pw_chain[1].name,
+                                               C=pw_chain[2].name, D=pw_chain[3].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("∀x:Ax→Bx", A=pw_chain[1].name, B=pw_chain[4].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("∀x:Ax→Bx", A=pw_chain[2].name, B=pw_chain[4].name)}
+        elif (scheme == SyllogisticScheme.GEN_DILEMMA and variant == SyllogisticSchemeVariant.DE_MORGAN):
+            premises = {"P1": transl.translate("∀x:Ax→¬(Bx∧Cx)", A=pw_chain[0].name, B=pw_chain[1].name, C=pw_chain[2].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("∀x:¬Ax→Bx", A=pw_chain[1].name, B=pw_chain[3].name)}
+            premises |= {f"P{len(premises) + 1}": transl.translate("∀x:¬Ax→Bx", A=pw_chain[2].name, B=pw_chain[3].name)}
+
+        return premises
+
+    def get_hypothesis(self, pw_chain: Tuple[Pathway, ...], scheme: SyllogisticScheme,
+                       variant: SyllogisticSchemeVariant, gene_name: str = "") -> Dict[str, str]:
+        transl = self.transl
+        if (scheme == SyllogisticScheme.GEN_MODUS_PONENS):
+            formula = "Aa" if (variant != SyllogisticSchemeVariant.NEGATION) else "¬Aa"
+            pw_idx = -1 if (variant in ["base", "negation"]) else 1
+            hypothesis = transl.translate(formula, a=gene_name, A=pw_chain[pw_idx].name)
+        elif (scheme == SyllogisticScheme.GEN_MODUS_TOLLENS):
+            hypothesis = transl.translate("¬Aa", a=gene_name, A=pw_chain[0].name)
+        elif (scheme == SyllogisticScheme.GEN_CONTRAPOSITION):
+            if (variant == SyllogisticSchemeVariant.BASE):
+                hypothesis = transl.translate("∀x:Ax→¬Bx", A=pw_chain[-1].name, B=pw_chain[0].name)
+            elif (variant == SyllogisticSchemeVariant.NEGATION):
+                hypothesis = transl.translate("∀x:¬Ax→¬Bx", A=pw_chain[-1].name, B=pw_chain[0].name)
+            elif (variant == SyllogisticSchemeVariant.COMPLEX_PREDICATES):
+                hypothesis = transl.translate("∀x:Ax→¬(Bx∧Cx)", A=pw_chain[1].name, B=pw_chain[0].name, C=pw_chain[2].name)
+            else: # De Morgan variant
+                hypothesis = transl.translate("∀x:Ax→(¬Bxv¬Cx)", A=pw_chain[1].name, B=pw_chain[0].name, C=pw_chain[2].name)
+        elif (scheme == SyllogisticScheme.HYPOTHETICAL_SYLLOGISM_1):
+            if (variant in ["base", "negation"]):
+                hypothesis = transl.translate("∀x:Ax→Bx", A=pw_chain[0].name, B=pw_chain[-1].name)
+            elif (variant == SyllogisticSchemeVariant.COMPLEX_PREDICATES):
+                hypothesis = transl.translate("∀x:Ax→Bx", A=pw_chain[0].name, B=pw_chain[2].name)
+            else: # De Morgan variant
+                hypothesis = transl.translate("∀x:¬(AxvBx)→Cx", A=pw_chain[0].name, B=pw_chain[3].name, C=pw_chain[2].name)
+        elif (scheme == SyllogisticScheme.HYPOTHETICAL_SYLLOGISM_3):
+            if (variant in ["base", "complex_predicates", "de_morgan"]):
+                hypothesis = transl.translate("∃x:Ax∧¬Bx", A=pw_chain[2].name, B=pw_chain[0].name)
+            else: # Negation variant
+                hypothesis = transl.translate("∃x:Ax∧Bx", A=pw_chain[2].name, B=pw_chain[0].name)
+        elif (scheme == SyllogisticScheme.DISJUNCTVE_SYLLOGISM):
+            if (variant in ["base", "negation", "complex_predicates"]):
+                hypothesis = transl.translate("∀x:Ax→Bx", A=pw_chain[0].name, B=pw_chain[2].name)
+            else: # De Morgan variant
+                hypothesis = transl.translate("∀x:(Ax∧Bx)→Cx", A=pw_chain[0].name, B=pw_chain[3].name, C=pw_chain[2].name)
+        else: # Generalised dilemma
+            if (variant in ["base", "de_morgan"]):
+                hypothesis = transl.translate("∀x:Ax→Bx", A=pw_chain[0].name, B=pw_chain[3].name)
+            elif (variant == SyllogisticSchemeVariant.NEGATION):
+                hypothesis = transl.translate("∀x:Ax→¬Bx", A=pw_chain[0].name, B=pw_chain[3].name)
+            else: # Complex predicates variant
+                hypothesis = transl.translate("∀x:Ax→(BxvCx)", A=pw_chain[0].name, B=pw_chain[4].name, C=pw_chain[3].name)
+
+        return {"C": transl.translate("⊢", hyp=hypothesis)}
+
+
+def get_ph_tuples(pwops: PathwaySetOps, scheme: SyllogisticScheme, variant: SyllogisticSchemeVariant,
+                  length: int = 2, dummy: bool = False, subset_size: int = 200) -> List[Dict[str, str]]:
+    ph_tuples = list()
+    dummy_combs = combinations(ascii_uppercase, r=4)
+    pw_chains = pwops.get_pw_chains(length, scheme, variant, subset_size)
+    for pw_chain in pw_chains:
+        if (scheme in [SyllogisticScheme.GEN_MODUS_PONENS, SyllogisticScheme.GEN_MODUS_TOLLENS]):
+            genes_set = pwops.get_genes_set(pw_chain, scheme, variant)
+            for gene in list(genes_set)[:subset_size // 10]:
+                gene_name = gene if not dummy else "".join(next(dummy_combs))
+                premises = pwops.get_premises(pw_chain, scheme, variant, gene_name)
+                hypothesis = pwops.get_hypothesis(pw_chain, scheme, variant, gene_name)
+                ph_tuples.append(premises | hypothesis)
+        else:
+            premises = pwops.get_premises(pw_chain, scheme, variant)
+            hypothesis = pwops.get_hypothesis(pw_chain, scheme, variant)
+            ph_tuples.append(premises | hypothesis)
+
+    return ph_tuples[:subset_size]
 
 
 def falsify(ph_tuples: List[Dict[str, str]]):
@@ -301,71 +706,60 @@ def falsify(ph_tuples: List[Dict[str, str]]):
 
     for ph_tuple in ph_tuples:
         falsified_tuples.append(ph_tuple.copy())
-        if (falsified_tuples[-1]["C"].startswith("Every")):
-            falsified_tuples[-1]["C"] = falsified_tuples[-1]["C"].replace("Every", "Not every")
-        else:
-            falsified_tuples[-1]["C"] = falsified_tuples[-1]["C"].replace("It is true", "It is false")
+        falsified_tuples[-1]["C"] = falsified_tuples[-1]["C"].replace("It is true", "It is false")
 
     return falsified_tuples
 
 
-def add_distractors(ph_tuple: Dict[str, str], oth_ph_tuples: List[Dict[str, str]], tree: Tree, n: int):
+def add_distractors(ph_tuple: Dict[str, str], pwops: PathwaySetOps, n: int):
     premise_keys = [pk for pk in ph_tuple if pk != "C"]
     genes = set()
     for p_key in premise_keys:
         if ("Gene" not in ph_tuple[p_key]):
-            mo = ALL_MEMBER_RGX.search(ph_tuple[p_key])
-            if (not mo):
-                mo = EXISTS_MEMBER_RGX.search(ph_tuple[p_key])
-            if (not mo):
-                mo = DISJ_MEMBER_RGX.search(ph_tuple[p_key])
-            if (not mo):
-                print("MISSED RGX:", ph_tuple[p_key])
-                exit(1)
-            for pw in [mo.group(pwk) for pwk in mo.groupdict() if pwk.startswith("pw")]:
-                if (pw != tree.root):
-                    genes.update(chain(*[nd.data for nd in tree.leaves(pw)]))
+            pathways = [pwops.get_pathway(pw) for pw in MEMBER_RGX.findall(ph_tuple[p_key])
+                        if (pw != "Disease" and pw in pwops.tree)]
+            genes.update(*pathways)
 
-    unrel_filter = lambda node: len(
-        genes.intersection(set(chain(*[nd.data for nd in tree.leaves(node.identifier)])))) == 0
-    unrel_pws = [node.identifier for node in tree.filter_nodes(unrel_filter)]
+    unrel = [pw for pw in pwops.get_all_pathways() if (len(pw.intersection(genes)) == 0)]
+    # parent_pairs = pwops.get_pw_chains(2, SyllogisticScheme.GEN_MODUS_PONENS, SyllogisticSchemeVariant.BASE)
+    # shuffle(parent_pairs)
+    # unrel_pairs = list()
+    # for pwc in parent_pairs:
+    #     if (pwc[0].name in unrel and pwc[1].name in unrel):
+    #         unrel_pairs.append(pwc)
+    #         if (len(unrel_pairs) >= n):
+    #             break
 
-    i = 0
-    while (i < n):
-        for oth_ph_tuple in oth_ph_tuples:
-            if (oth_ph_tuple["C"] == ph_tuple["C"]):
-                continue
-            for sk in oth_ph_tuple:
-                if (sk != "C" and "Gene" not in oth_ph_tuple[sk] and oth_ph_tuple[sk] not in set(ph_tuple.items())):
-                    unrel = sum([f" {pw} " in oth_ph_tuple[sk] for pw in unrel_pws]) > 0
-                    if (unrel):
-                        ph_tuple[f"P{len(premise_keys) + 1 + i}"] = oth_ph_tuple[sk]
-                        i += 1
-                        if (i >= n):
-                            break
-            if (i >= n):
+    unrel_perms = list(permutations(unrel, 2))
+    shuffle(unrel_perms)
+    unrel_pairs = list()
+    for pw1, pw2 in unrel_perms:
+        if (pw1.implies(pw2)):
+            unrel_pairs.append((pw1, pw2))
+            if (len(unrel_pairs) >= n):
                 break
 
-    # Puts hypothesis / conclusion back at the end of the dict structure.
-    hyp = ph_tuple["C"]
-    del ph_tuple["C"]
-    ph_tuple["C"] = hyp
+    for i in range(n):
+        ph_tuple[f"P{len(premise_keys) + 1 + i}"] = pwops.transl.translate("∀x:Ax→Bx", A=unrel_pairs[i][0].name,
+                                                                           B=unrel_pairs[i][1].name)
 
     return ph_tuple
 
 
-def add_distractors_all(ph_tuples: List[Dict[str, str]], tree: Tree, n: int = 5, seed: int = None):
-    oth_ph_tuples = list(ph_tuples)
+def add_distractors_all(ph_tuples: List[Dict[str, str]], pwops: PathwaySetOps, n: int = 5, seed: int = None):
     random.seed(seed)
-    shuffle(oth_ph_tuples)
-
     with Parallel(n_jobs=cpu_count(True)) as ppool:
-        upd_ph_tuples = ppool(delayed(add_distractors)(ph_tuple, oth_ph_tuples, tree, n)
+        upd_ph_tuples = ppool(delayed(add_distractors)(ph_tuple, pwops, n)
                               for ph_tuple in tqdm(ph_tuples, desc="Adding distractors"))
 
     for i in range(len(ph_tuples)):
         for key in upd_ph_tuples[i]:
             ph_tuples[i][key] = upd_ph_tuples[i][key]
+
+        # Puts hypothesis / conclusion back at the end of the dict structure.
+        hyp = ph_tuples[i]["C"]
+        del ph_tuples[i]["C"]
+        ph_tuples[i]["C"] = hyp
 
 
 
