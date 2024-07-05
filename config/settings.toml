@@ -2,4 +2,5 @@
     data_file_path='data/reactome_pathways_API.xlsx'
     prompt_template_file_path='templates/task_prompts.json'
     sttm_template_file_path='templates/statements.json'
+    scheme_template_file_path='templates/schemes.json'
     results_path='outputs/results'

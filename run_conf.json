@@ -1,0 +1,17 @@
+{
+  "tasks": ["TASK_1"],
+  "num_premises": 2,
+  "max_distractors": 5,
+  "subset_size": 200,
+  "batch_size": 20,
+  "icl": false,
+  "models": [
+    "mistralai/Mistral-7B-v0.1",
+    "mistralai/Mistral-7B-Instruct-v0.2",
+    "google/gemma-7b",
+    "google/gemma-7b-it",
+    "meta-llama/Meta-Llama-3-8B",
+    "meta-llama/Meta-Llama-3-8B-Instruct",
+    "BioMistral/BioMistral-7B"
+  ]
+}

@@ -112,8 +112,6 @@ class SyllogisticReasoningTest:
         answers, gtd = self.load_logged()
 
         if (not answers):
-            if (num_distractors > 0):
-                add_distractors_all(ph_tuples, self._pwops, n=num_distractors, seed=self.seed)
             tuple_sets = {"True": ph_tuples, "False": falsify(ph_tuples)}
             results = {truth_val: list() for truth_val in tuple_sets}
             questions = list()
@@ -147,8 +145,6 @@ class SyllogisticReasoningTest:
         answers, gtd = self.load_logged()
 
         if (not answers):
-            if (num_distractors > 0):
-                add_distractors_all(ph_tuples, self._pwops, n=num_distractors, seed=self.seed)
             tuple_sets = {"True": ph_tuples, "False": falsify(ph_tuples)}
             truth_results = {truth_val: list() for truth_val in tuple_sets}
             premise_results = {f"P{i + 1}": list() for i in range(self.num_premises + num_distractors)}
@@ -162,7 +158,7 @@ class SyllogisticReasoningTest:
 
             batch_size = self.batch_size
             for i in tqdm(range(len(questions) // batch_size + int(len(questions) % batch_size > 0)),
-                          desc=f"Prompting [{self.model_locator}] for {self.scheme} with {num_distractors} distractors"):
+                          desc=f"Prompting [{self.model_locator}] for {self.scheme} ({self.variant}) with {num_distractors} distractors"):
                 answers = self._llm.prompt(self.templates["CONTEXT"] + self.templates["TASK_2"],
                                            [q[0] for q in questions[i * batch_size: i * batch_size + batch_size]],
                                            icl_examples if self.icl else "",
