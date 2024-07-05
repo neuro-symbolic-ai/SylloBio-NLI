@@ -1,0 +1,217 @@
+{
+  "gen_modus_ponens": {
+    "base": {
+      "premises": [
+        {"formula":  "∀x:Ax→Bx", "pw_chain": []},
+        {"formula":  "Aa", "pw_chain": [0]}
+      ],
+      "hypothesis": {"formula":  "Aa", "pw_chain": [-1]}
+    },
+    "negation": {
+      "premises": [
+        {"formula":  "∀x:Ax→¬Bx", "pw_chain": [-2, -1], "rel": -1},
+        {"formula":  "Aa", "pw_chain": [0]}
+      ],
+      "hypothesis": {"formula":  "¬Aa", "pw_chain": [-1]}
+    },
+    "complex_predicates": {
+       "premises": [
+         {"formula":  "∀x:(Ax∧Bx)→Cx", "pw_chain": [0, 2, 1]},
+         {"formula":  "Aa", "pw_chain": [0]},
+         {"formula":  "Aa", "pw_chain": [2]}
+      ],
+      "hypothesis": {"formula":  "Aa", "pw_chain": [1]}
+    },
+    "de_morgan": {
+      "premises": [
+         {"formula":  "∀x:¬(Ax∧Bx)→Cx", "pw_chain": [0, 2, 1]},
+         {"formula":  "¬Aa", "pw_chain": [0]},
+         {"formula":  "¬Aa", "pw_chain": [2]}
+      ],
+      "hypothesis": {"formula":  "Aa", "pw_chain": [1]}
+    }
+  },
+  "gen_modus_tollens": {
+    "base": {
+      "premises": [
+        {"formula":  "∀x:Ax→Bx", "pw_chain": []},
+        {"formula":  "¬Aa", "pw_chain": [-1]}
+      ],
+      "hypothesis": {"formula":  "¬Aa", "pw_chain": [0]}
+    },
+    "negation": {
+      "premises": [
+        {"formula":  "∀x:Ax→Bx", "pw_chain": []},
+        {"formula":  "Aa", "pw_chain": [-1]}
+      ],
+      "hypothesis": {"formula":  "¬Aa", "pw_chain": [0]}
+    },
+    "complex_predicates": {
+      "premises": [
+        {"formula":  "∀x:Ax→(Bx∧Cx)", "pw_chain": [0, 1, 2]},
+        {"formula":  "¬Aa", "pw_chain": [1]}
+      ],
+      "hypothesis": {"formula":  "¬Aa", "pw_chain": [0]}
+    },
+    "de_morgan": {
+      "premises": [
+        {"formula":  "∀x:Ax→(Bx∧Cx)", "pw_chain": [0, 1, 2]},
+        {"formula":  "¬Aav¬Ba", "pw_chain": [1, 2]}
+      ],
+      "hypothesis": {"formula":  "¬Aa", "pw_chain": [0]}
+    }
+  },
+  "gen_contraposition": {
+    "base": {
+      "premises": [
+        {"formula":  "∀x:Ax→¬Bx", "pw_chain": [-2, -1], "rel": -1}
+      ],
+      "hypothesis": {"formula":  "∀x:Ax→¬Bx", "pw_chain": [-1, 0]}
+    },
+    "negation": {
+      "premises": [
+        {"formula":  "∀x:Ax→Bx", "pw_chain": []}
+      ],
+      "hypothesis": {"formula":  "∀x:¬Ax→¬Bx", "pw_chain": [-1, 0]}
+    },
+    "complex_predicates": {
+      "premises": [
+        {"formula":  "∀x:(Ax∧Bx)→¬Cx", "pw_chain": [0, 2, 1]}
+      ],
+      "hypothesis": {"formula":  "∀x:Ax→¬(Bx∧Cx)", "pw_chain": [1, 0, 2]}
+    },
+    "de_morgan": {
+      "premises": [
+        {"formula":  "∀x:(Ax∧Bx)→¬Cx", "pw_chain": [0, 2, 1]}
+      ],
+      "hypothesis": {"formula":  "∀x:Ax→(¬Bxv¬Cx)", "pw_chain": [1, 0, 2]}
+    }
+  },
+  "hypothetical_syllogism_1": {
+    "base": {
+      "premises": [
+        {"formula":  "∀x:Ax→Bx", "pw_chain": []}
+      ],
+      "hypothesis": {"formula":  "∀x:Ax→Bx", "pw_chain": [0, -1]}
+    },
+    "negation": {
+      "premises": [
+        {"formula":  "∀x:Ax→¬Bx", "pw_chain": [-3, -2], "rel":  -2},
+        {"formula":  "∀x:¬Ax→Bx", "pw_chain": [-2, -1], "rel":  -1}
+      ],
+      "hypothesis": {"formula":  "∀x:Ax→Bx", "pw_chain": [0, -1]}
+    },
+    "complex_predicates": {
+      "premises": [
+        {"formula":  "∀x:Ax→Bx", "pw_chain": [0, 1]},
+        {"formula":  "∀x:Ax→Bx", "pw_chain": [0, 3]},
+        {"formula":  "∀x:(Ax∧Bx)→Cx", "pw_chain": [1, 3, 2]}
+      ],
+      "hypothesis": {"formula":  "∀x:Ax→Bx", "pw_chain": [0, 2]}
+    },
+    "de_morgan": {
+      "premises": [
+        {"formula":  "∀x:¬(AxvBx)→Cx", "pw_chain": [0, 3, 1]},
+        {"formula":  "∀x:Ax→Bx", "pw_chain": [1, 2]}
+      ],
+      "hypothesis": {"formula":  "∀x:¬(AxvBx)→Cx", "pw_chain": [0, 3, 2]}
+    }
+  },
+  "hypothetical_syllogism_3": {
+    "base": {
+      "premises": [
+        {"formula":  "∀x:Ax→Bx", "pw_chain": [0, 1]},
+        {"formula":  "∃x:Ax∧¬Bx", "pw_chain": [2, 1]}
+      ],
+      "hypothesis": {"formula":  "∃x:Ax∧¬Bx", "pw_chain": [2, 0]}
+    },
+    "negation": {
+      "premises": [
+        {"formula":  "∀x:¬Ax→Bx", "pw_chain": [0, 1]},
+        {"formula":  "∃x:Ax∧¬Bx", "pw_chain": [2, 1]}
+      ],
+      "hypothesis": {"formula":  "∃x:Ax∧Bx", "pw_chain": [2, 0]}
+    },
+    "complex_predicates": {
+      "premises": [
+        {"formula":  "∀x:Ax→Bx", "pw_chain": [0, 1]},
+        {"formula":  "∀x:Ax→Bx", "pw_chain": [0, 3]},
+        {"formula":  "∃x:Ax∧(¬Bxv¬Cx)", "pw_chain": [2, 1, 3]}
+      ],
+      "hypothesis": {"formula":  "∃x:Ax∧¬Bx", "pw_chain": [2, 0]}
+    },
+    "de_morgan": {
+      "premises": [
+        {"formula":  "∀x:Ax→Bx", "pw_chain": [0, 1]},
+        {"formula":  "∀x:Ax→Bx", "pw_chain": [0, 3]},
+        {"formula":  "∃x:Ax∧¬(Bx∧Cx)", "pw_chain": [2, 1, 3]}
+      ],
+      "hypothesis": {"formula":  "∃x:Ax∧¬Bx", "pw_chain": [2, 0]}
+    }
+  },
+  "disjunctive_syllogism": {
+    "base": {
+      "premises": [
+        {"formula":  "∀x:Ax→(BxvCx)", "pw_chain": [0, 1, 2]},
+        {"formula":  "∀x:Ax→¬Bx", "pw_chain": [0, 1]}
+      ],
+      "hypothesis": {"formula":  "∀x:Ax→Bx", "pw_chain": [0, 2]}
+    },
+    "negation": {
+      "premises": [
+        {"formula":  "∀x:Ax→(BxvCx)", "pw_chain": [0, 1, 2]},
+        {"formula":  "∀x:Ax→¬Bx", "pw_chain": [1, 0]}
+      ],
+      "hypothesis": {"formula":  "∀x:Ax→Bx", "pw_chain": [0, 2]}
+    },
+    "complex_predicates": {
+      "premises": [
+        {"formula":  "∀x:Ax→(BxvCxvDx)", "pw_chain": [0, 1, 2, 3]},
+        {"formula":  "∀x:Ax→¬Bx", "pw_chain": [0, 1]},
+        {"formula":  "∀x:Ax→¬Bx", "pw_chain": [0, 3]}
+      ],
+      "hypothesis": {"formula":  "∀x:Ax→Bx", "pw_chain": [0, 2]}
+    },
+    "de_morgan": {
+      "premises": [
+        {"formula":  "∀x:(Ax∧Bx)→(CxvDx)", "pw_chain": [0, 3, 1, 2]},
+        {"formula":  "∀x:Ax→(¬Bxv¬Cx)", "pw_chain": [1, 0, 3]}
+      ],
+      "hypothesis": {"formula":  "∀x:(Ax∧Bx)→Cx", "pw_chain": [0, 3, 2]}
+    }
+  },
+  "gen_dilemma": {
+    "base": {
+      "premises": [
+        {"formula":  "∀x:Ax→(BxvCx)", "pw_chain": [0, 1, 2]},
+        {"formula":  "∀x:Ax→Bx", "pw_chain": [1, 3]},
+        {"formula":  "∀x:Ax→Bx", "pw_chain": [2, 3]}
+      ],
+      "hypothesis": {"formula":  "∀x:Ax→Bx", "pw_chain": [0, 3]}
+    },
+    "negation": {
+      "premises": [
+        {"formula":  "∀x:Ax→(BxvCx)", "pw_chain": [0, 1, 2]},
+        {"formula":  "∀x:Ax→¬Bx", "pw_chain": [3, 1]},
+        {"formula":  "∀x:Ax→¬Bx", "pw_chain": [3, 2]}
+      ],
+      "hypothesis": {"formula":  "∀x:Ax→¬Bx", "pw_chain": [0, 3]}
+    },
+    "complex_predicates": {
+      "premises": [
+          {"formula":  "∀x:Ax→(BxvCxvDx)", "pw_chain": [0, 1, 2, 3]},
+          {"formula":  "∀x:Ax→Bx", "pw_chain": [1, 4]},
+          {"formula":  "∀x:Ax→Bx", "pw_chain": [2, 4]}
+        ],
+        "hypothesis": {"formula":  "∀x:Ax→(BxvCx)", "pw_chain": [0, 4, 3]}
+    },
+    "de_morgan": {
+      "premises": [
+          {"formula":  "∀x:Ax→¬(Bx∧Cx)", "pw_chain": [0, 1, 2]},
+          {"formula":  "∀x:¬Ax→Bx", "pw_chain": [1, 3]},
+          {"formula":  "∀x:¬Ax→Bx", "pw_chain": [2, 3]}
+        ],
+        "hypothesis": {"formula":  "∀x:Ax→Bx", "pw_chain": [0, 3]}
+    }
+  }
+}
