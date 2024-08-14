@@ -2,7 +2,7 @@ import json
 import random
 import re
 import pandas as pd
-from typing import Tuple, List, Dict, Set, Union, Optional, Iterable, Self
+from typing import Tuple, List, Dict, Set, Optional, Iterable, Self
 from enum import StrEnum, auto
 from itertools import combinations, permutations
 from string import ascii_uppercase
@@ -211,10 +211,6 @@ class PathwaySetOps:
                                               pw_f.implies(pw_g) and pw_f.implies(pw_i) and conj_gi.implies(pw_h))])
                         if (len(pw_chains) >= subset_size):
                             break
-                    # pw_chains = [
-                    #     (pw_f, pw_g, pw_h, pw_i) for pw_f, pw_g, pw_h, pw_i in combinations(self.get_all_pathways(), 4)
-                    #     if (pw_f.implies(pw_g) and pw_f.implies(pw_i) and Pathway.conjunction(pw_g, pw_i).implies(pw_h))
-                    # ]
                 elif (variant == SyllogisticSchemeVariant.DE_MORGAN):
                     for pw_f, pw_i in combinations(pathways, 2):
                         conj_neg_fi = Pathway.conjunction(pw_f.negation(self.all_genes), pw_i.negation(self.all_genes))
@@ -400,7 +396,7 @@ class PathwaySetOps:
         if (variant in [SyllogisticSchemeVariant.BASE, SyllogisticSchemeVariant.NEGATION]):
             if (scheme == SyllogisticScheme.GEN_MODUS_PONENS):
                 genes_set = pw_chain[0]
-            else: # Modus tollens
+            else:  # Modus tollens
                 if (variant == SyllogisticSchemeVariant.BASE):
                     genes_set = pw_chain[-1].negation(self.all_genes)
                 else:
@@ -410,7 +406,7 @@ class PathwaySetOps:
                 genes_set = Pathway.conjunction(pw_chain[0], pw_chain[2])
             else:  # Modus tollens
                 genes_set = pw_chain[1].negation(self.all_genes)
-        else: # De Morgan variant
+        else:  # De Morgan variant
             if (scheme == SyllogisticScheme.GEN_MODUS_PONENS):
                 genes_set = Pathway.conjunction(pw_chain[0].negation(self.all_genes),
                                                 pw_chain[2].negation(self.all_genes))
