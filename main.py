@@ -35,6 +35,10 @@ def main(argv):
     results = list()
     for task in tasks:
         for model in models:
+            if (model == "mistralai/Mixtral-8x7B-Instruct-v0.1"):
+                batch_size = 40
+            else:
+                batch_size = conf["batch_size"] if conf else 20
             for scheme in SyllogisticScheme:
                 dummy_choices = [False, True] if (scheme.startswith("gen_modus")) else [False]
                 for dummy in dummy_choices:
