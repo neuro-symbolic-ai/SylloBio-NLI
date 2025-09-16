@@ -41,7 +41,7 @@
     },
     "negation": {
       "premises": [
-        {"formula":  "∀x:Ax→Bx", "pw_chain": []},
+        {"formula":  "∀x:Ax→¬Bx", "pw_chain": []},
         {"formula":  "Aa", "pw_chain": [-1]}
       ],
       "hypothesis": {"formula":  "¬Aa", "pw_chain": [0]}
