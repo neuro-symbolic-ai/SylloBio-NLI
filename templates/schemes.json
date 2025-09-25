@@ -24,7 +24,7 @@
     },
     "de_morgan": {
       "premises": [
-         {"formula":  "∀x:¬(Ax∧Bx)→Cx", "pw_chain": [0, 2, 1]},
+         {"formula":  "∀x:¬(AxvBx)→Cx", "pw_chain": [0, 2, 1]},
          {"formula":  "¬Aa", "pw_chain": [0]},
          {"formula":  "¬Aa", "pw_chain": [2]}
       ],
