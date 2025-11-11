@@ -25,7 +25,7 @@ By analyzing how well the AI models performed on these puzzles, we could assess 
 
 The following diagram illustrates the complete research approach: generation of syllogistic arguments from domain-specific ontologies, parameterized input to LLMs, and evaluation tasks including textual inference and premise selection.</p>
 
-<img src="syllobio_diag.png" style="width: 60%;">
+![SylloBio-NLI Diagram](syllobio_diag.png)
 
 ## Key Findings
 
